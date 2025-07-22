@@ -58,4 +58,3 @@ function simulateAIResponse(prompt: string, gameState: any) {
     actions: ["Examine patient", "Order tests", "Begin treatment"],
   }
 }
-

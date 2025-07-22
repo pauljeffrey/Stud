@@ -11,6 +11,7 @@ const inter = Inter({ subsets: ["latin"] })
 export const metadata: Metadata = {
   title: "MediQuest - Medical Role-Playing Game",
   description: "An immersive medical role-playing experience where you diagnose, treat, and save lives",
+    generator: 'v0.dev'
 }
 
 export default function RootLayout({
@@ -30,4 +31,3 @@ export default function RootLayout({
     </html>
   )
 }
-

@@ -25,6 +25,3 @@ MODES = ["Outpatient", "Emergency", "ICU", "cellular", "Inpatient",  "Trauma", "
 AREAS = ["Rural", "Urban", "Countryside", "Semi-Urban", "Coastal", "Forest Area", "Village", "Town", "industrial Area", "Desert", 
          "Mountainous Region", "Island", "Suburban", "Remote Area", "Slum", "Metropolitan Area", 
          "in-vivo", "in-vitro", "in-situ", "ex-vivo", "ex-situ", "ex-plant", "ex-organ", "ex-tissue", "ex-cellular", "ex-molecular",]
-
-
-

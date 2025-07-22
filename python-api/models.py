@@ -2,6 +2,65 @@ from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
+class PatientInfo(BaseModel):
+    name: str
+    age: int
+    gender: str
+    chief_complaint: str
+    current_condition: str
+    background: str
+    vitals: Dict[str, Any]
+
+class GameProgress(BaseModel):
+    current_phase: str
+    completed_actions: List[str]
+    score: int
+    time_elapsed: int
+    dice_rolls: int
+    last_dice_result: int
+
+class NPC(BaseModel):
+    name: str
+    role: str
+    available: bool
+    mood: str
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+    timestamp: datetime
+    npc_name: Optional[str] = None
+
+class GameState(BaseModel):
+    user_id: str
+    case_id: str
+    current_scenario: str
+    patient_info: PatientInfo
+    game_progress: GameProgress
+    inventory: List[str]
+    chat_history: List[ChatMessage]
+    npcs: List[NPC]
+
+class GameChatRequest(BaseModel):
+    game_state: GameState
+    user_message: str
+
+class DiceEffectRequest(BaseModel):
+    game_state: GameState
+    dice_result: int
+
+class NPCChatRequest(BaseModel):
+    game_state: GameState
+    npc_name: str
+
+class SaveGameRequest(BaseModel):
+    game_state: GameState
+
+class LearningChatRequest(BaseModel):
+    document_id: str
+    message: str
+    chat_history: List[Dict[str, str]]
+
 class UserResponse(BaseModel):
     answer: str
     reason: Optional[str] = None
@@ -12,37 +71,30 @@ class Scene(BaseModel):
 class Scenario(BaseModel):
     scenes: List[Scene]
     
-# Pydantic Model for Game Scenario Output
-class GameScenario(BaseModel):
-    game_scenario: Scenario
-    country_situation: str
-    metadata: dict
-    objective: str
-
 class Investigation(BaseModel):
-    type: str  # e.g., "full blood count", "lft", etc.
+    type: str
     result: Dict[str, Any]
 
 class Investigations(BaseModel):
     result: List[Investigation]
 
 class ScanImage(BaseModel):
-    type: str  # e.g., "USS", "CT scan", etc.
-    result: Dict[str, Any]  # Image object in the best format
-    report: str  # Report of the image
+    type: str
+    result: Dict[str, Any]
+    report: str
 
 class ScanImages(BaseModel):
     result: List[ScanImage]
 
 class PhysiologicSignal(BaseModel):
-    type: Optional[str] = None  # e.g., "ECG", "EEG", etc.
+    type: Optional[str] = None
     result: Optional[Dict[str, Any]] = None
 
 class PhysiologicSignals(BaseModel):
     result: List[PhysiologicSignal] = []
 
 class AIResponse(BaseModel):
-    scenario: GameScenario
+    scenario: Scenario
     question: str
     options: Optional[List[str]] = None
     answer: str
@@ -50,45 +102,4 @@ class AIResponse(BaseModel):
     blood_investigation: Optional[Investigations] = None
     scan: Optional[ScanImages] = None
     signals: Optional[PhysiologicSignals] = None
-    time: str  # Time in seconds string for countdown timer in frontend
-
-class Message(BaseModel):
-    role: str
-    content: str
-    timestamp: Optional[str] = None
-
-class GameState(BaseModel):
-    user_id: str
-    case_id: str
-    messages: List[Message] = []
-    current_scenario: Optional[Scenario] = None
-    current_question: Optional[str] = None
-    options: Optional[List[str]] = None
-    time_remaining: int = 600  # Default 10 minutes
-    checkpoint: Optional[str] = None
-    lifelines_used: Dict[str, bool] = Field(default_factory=lambda: {
-        "friend": False,
-        "clue": False,
-        "eliminate": False
-    })
-    score: int = 0
-    quiz_type: Optional[str] = None  # "open", "true_false", "multichoice"
-    num_questions: Optional[int] = None
-    current_question_index: int = 0
-    total_questions: Optional[int] = None
-
-class GameRequest(BaseModel):
-    game_state: GameState
-    user_response: Optional[UserResponse] = None
-
-class GameResponse(BaseModel):
-    game_state: GameState
-    response: AIResponse
-    
-class NPC(BaseModel):
-    name: str
-    sex: str
-    role: str  # e.g., "doctor", "nurse", etc.
-    description: str
-    behaviour_rules: Dict[str, Any]  # Rules for NPC behaviour
-    dialogue: List[str]  # Possible dialogues or interactions with the NPC
+    time: str

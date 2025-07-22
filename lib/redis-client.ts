@@ -53,5 +53,3 @@ export interface RedisClient {
     // For now, return a mock client
     return new MockRedisClient()
   }
-  
-  

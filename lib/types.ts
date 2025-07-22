@@ -56,5 +56,3 @@ export interface User {
     actions?: string[]
     patientUpdate?: Partial<PatientData>
   }
-  
-  

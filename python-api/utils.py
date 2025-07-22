@@ -35,4 +35,3 @@ def generate_game_scenario():
         metadata={"attributes": attributes},
         objective=scenario_lines[-1]  # Assuming last line contains the objective
     )
-
