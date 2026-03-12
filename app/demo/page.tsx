@@ -1,193 +1,221 @@
 "use client"
 
-import type React from "react"
-
-import { useState, useEffect, useRef } from "react"
-import { Button } from "@/components/ui/button"
-import { Card } from "@/components/ui/card"
-import { Input } from "@/components/ui/input"
-import { Loader2, Send, Clock, AlertTriangle } from "lucide-react"
-import Link from "next/link"
-import { useToast } from "@/components/ui/use-toast"
+import { useState } from "react"
+import { useRouter } from "next/navigation"
+import { Button } from "@/app/components/ui/button"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/app/components/ui/card"
+import { Input } from "@/app/components/ui/input"
+import { Label } from "@/app/components/ui/label"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/app/components/ui/select"
+import { ArrowRight, Sparkles, AlertCircle } from "lucide-react"
+import { motion } from "framer-motion"
+import { useToast } from "@/app/components/ui/use-toast"
 
 export default function DemoPage() {
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      role: "system",
-      content:
-        "Welcome to the MediQuest demo! You are a general practitioner in a busy hospital. A patient has just arrived with symptoms that need your attention. What would you like to do?",
-    },
-  ])
-  const [input, setInput] = useState("")
-  const [isLoading, setIsLoading] = useState(false)
-  const [timeRemaining, setTimeRemaining] = useState(300) // 5 minutes in seconds
-  const messagesEndRef = useRef<HTMLDivElement>(null)
+  const router = useRouter()
   const { toast } = useToast()
+  const [loading, setLoading] = useState(false)
+  const [formData, setFormData] = useState({
+    profession: "",
+    clinical_setting: "",
+    model_name: "",
+    api_key: "",
+    provider: "google"
+  })
 
-  // Timer effect
-  useEffect(() => {
-    if (timeRemaining <= 0) {
-      toast({
-        title: "Time's up!",
-        description: "Your demo session has ended. Register for the full experience!",
-        variant: "destructive",
-      })
-      return
-    }
-
-    const timer = setInterval(() => {
-      setTimeRemaining((prev) => prev - 1)
-    }, 1000)
-
-    return () => clearInterval(timer)
-  }, [timeRemaining, toast])
-
-  // Auto-scroll to bottom of messages
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
-  }, [messages])
-
-  // Format time remaining as MM:SS
-  const formatTime = (seconds: number) => {
-    const mins = Math.floor(seconds / 60)
-    const secs = seconds % 60
-    return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`
-  }
-
-  async function handleSubmit(e: React.FormEvent) {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!input.trim() || isLoading) return
-
-    // Add user message
-    const userMessage = { role: "user", content: input }
-    setMessages((prev) => [...prev, userMessage])
-    setInput("")
-    setIsLoading(true)
+    setLoading(true)
 
     try {
-      // Simulate API call to AI service
-      await new Promise((resolve) => setTimeout(resolve, 1500))
+      // Initialize demo game
+      const response = await fetch("/api/game/initialize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          game_config: {
+            profession: formData.profession || undefined,
+            clinical_setting: formData.clinical_setting || undefined,
+            total_cases: 3,
+            max_clinical_changes: 3
+          },
+          is_demo: true,
+          model_name: formData.model_name || undefined,
+          api_key: formData.api_key || undefined,
+          provider: formData.provider
+        })
+      })
 
-      // Demo responses based on keywords in user input
-      let responseContent = ""
-      const lowerInput = input.toLowerCase()
-
-      if (lowerInput.includes("examine") || lowerInput.includes("check")) {
-        responseContent =
-          "Upon examination, you notice the patient is a 45-year-old male with pale skin, sweating profusely. His pulse is rapid at 110 BPM, and he's clutching his chest. He reports the pain started about an hour ago and radiates to his left arm."
-      } else if (lowerInput.includes("test") || lowerInput.includes("ecg") || lowerInput.includes("ekg")) {
-        responseContent =
-          "You order an ECG which shows ST-segment elevation in leads V1-V4. Blood tests reveal elevated troponin levels. These findings are consistent with an acute myocardial infarction (heart attack)."
-      } else if (lowerInput.includes("treat") || lowerInput.includes("medication")) {
-        responseContent =
-          "You administer aspirin 325mg and nitroglycerin. The patient needs immediate intervention. In a full game, you would coordinate with cardiology for a potential angioplasty or other interventions."
-      } else {
-        responseContent =
-          "The patient looks at you expectantly. His condition seems serious. Would you like to examine him more closely, order tests, or begin treatment?"
+      if (!response.ok) {
+        const error = await response.json()
+        throw new Error(error.detail || "Failed to initialize demo")
       }
 
-      // Add system response
-      setMessages((prev) => [...prev, { role: "system", content: responseContent }])
-
-      // Add demo limitation message after 3 exchanges
-      if (messages.filter((m) => m.role === "user").length >= 2) {
-        setTimeout(() => {
-          setMessages((prev) => [
-            ...prev,
-            {
-              role: "system",
-              content:
-                "This is just a limited demo of MediQuest. Register for the full experience to access complete patient cases, collaborate with specialists, and track your medical career progress!",
-            },
-          ])
-        }, 2000)
-      }
-    } catch (error) {
+      const data = await response.json()
+      
+      // Navigate to mediquest with game state
+      router.push(`/mediquest?game_id=${data.game_state.game_id}`)
+    } catch (error: any) {
       toast({
         title: "Error",
-        description: "Failed to get a response. Please try again.",
-        variant: "destructive",
+        description: error.message || "Failed to start demo. Please try again.",
+        variant: "destructive"
       })
-    } finally {
-      setIsLoading(false)
+      setLoading(false)
     }
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-purple-900 to-purple-700 flex flex-col">
-      {/* Timer bar */}
-      <div className="bg-purple-800 p-2 text-white flex justify-between items-center">
-        <div className="flex items-center">
-          <Clock className="mr-2 h-5 w-5" />
-          <span>Demo Time Remaining: {formatTime(timeRemaining)}</span>
-        </div>
-        <Link href="/auth/register">
-          <Button size="sm" className="bg-purple-500 hover:bg-purple-600">
-            Register for Full Access
-          </Button>
-        </Link>
-      </div>
-
-      <div className="flex-1 container mx-auto p-4 flex flex-col">
-        <h1 className="text-2xl font-bold text-white mb-4">MediQuest Demo</h1>
-
-        {/* Demo limitations notice */}
-        <div className="bg-yellow-600 text-white p-3 rounded-md mb-4 flex items-start">
-          <AlertTriangle className="h-5 w-5 mr-2 flex-shrink-0 mt-0.5" />
-          <p className="text-sm">
-            This is a limited demo version with preset scenarios. The full version includes AI-powered dynamic
-            scenarios, multiplayer functionality, and progression tracking.
-          </p>
-        </div>
-
-        {/* Chat container */}
-        <Card className="flex-1 flex flex-col bg-white/10 backdrop-blur-sm border-purple-400">
-          <div className="flex-1 p-4 overflow-y-auto">
-            {messages.map((message, index) => (
-              <div
-                key={index}
-                className={`mb-4 ${message.role === "user" ? "ml-auto max-w-[80%]" : "mr-auto max-w-[80%]"}`}
-              >
-                <div
-                  className={`p-3 rounded-lg ${
-                    message.role === "user"
-                      ? "bg-purple-600 text-white rounded-br-none"
-                      : "bg-gray-200 text-gray-800 rounded-bl-none"
-                  }`}
-                >
-                  {message.content}
-                </div>
-              </div>
-            ))}
-            <div ref={messagesEndRef} />
+    <div className="min-h-screen bg-gradient-to-b from-black via-[#1E3A8A] to-[#8B5CF6] text-white py-12">
+      <div className="container mx-auto px-4 max-w-2xl">
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.8 }}
+        >
+          <div className="text-center mb-8">
+            <motion.div
+              className="inline-block mb-4"
+              animate={{ rotate: [0, 10, -10, 0] }}
+              transition={{ duration: 2, repeat: Infinity, repeatDelay: 3 }}
+            >
+              <Sparkles className="h-16 w-16 text-purple-400" />
+            </motion.div>
+            <h1 className="text-4xl md:text-5xl font-bold mb-4 bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">
+              Try Stud Demo
+            </h1>
+            <p className="text-gray-300 text-lg">
+              Experience 1 test game with 3 clinical scenarios and 3 dynamic changes each
+            </p>
           </div>
 
-          {/* Input area */}
-          <form onSubmit={handleSubmit} className="p-4 border-t border-purple-400">
-            <div className="flex gap-2">
-              <Input
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                placeholder="What would you like to do?"
-                className="bg-white/20 border-purple-400 text-white placeholder:text-gray-300"
-                disabled={isLoading || timeRemaining <= 0}
-              />
-              <Button
-                type="submit"
-                disabled={isLoading || !input.trim() || timeRemaining <= 0}
-                className="bg-purple-500 hover:bg-purple-600"
-              >
-                {isLoading ? <Loader2 className="h-5 w-5 animate-spin" /> : <Send className="h-5 w-5" />}
-              </Button>
-            </div>
-          </form>
-        </Card>
+          <Card className="bg-black/40 backdrop-blur-md border-purple-500/30">
+            <CardHeader>
+              <CardTitle className="text-2xl">Demo Configuration</CardTitle>
+              <CardDescription className="text-gray-400">
+                Configure your demo experience. Leave fields empty for random selection.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <form onSubmit={handleSubmit} className="space-y-6">
+                <div className="space-y-2">
+                  <Label htmlFor="profession">Profession (Optional)</Label>
+                  <Select
+                    value={formData.profession}
+                    onValueChange={(value) => setFormData({ ...formData, profession: value })}
+                  >
+                    <SelectTrigger className="bg-black/50 border-purple-500/30">
+                      <SelectValue placeholder="Select or leave empty for random" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="General Practitioner">General Practitioner</SelectItem>
+                      <SelectItem value="Nurse">Nurse</SelectItem>
+                      <SelectItem value="Emergency Medicine Physician">Emergency Medicine Physician</SelectItem>
+                      <SelectItem value="Pediatrician">Pediatrician</SelectItem>
+                      <SelectItem value="Surgeon">Surgeon</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="clinical_setting">Clinical Setting (Optional)</Label>
+                  <Select
+                    value={formData.clinical_setting}
+                    onValueChange={(value) => setFormData({ ...formData, clinical_setting: value })}
+                  >
+                    <SelectTrigger className="bg-black/50 border-purple-500/30">
+                      <SelectValue placeholder="Select or leave empty for random" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="Emergency">Emergency</SelectItem>
+                      <SelectItem value="ICU">ICU</SelectItem>
+                      <SelectItem value="Outpatient">Outpatient</SelectItem>
+                      <SelectItem value="Inpatient">Inpatient</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="bg-purple-900/30 border border-purple-500/30 rounded-lg p-4 space-y-4">
+                  <div className="flex items-start gap-2">
+                    <AlertCircle className="h-5 w-5 text-purple-400 mt-0.5" />
+                    <div className="flex-1">
+                      <p className="text-sm font-semibold text-purple-300 mb-1">
+                        Optional: Use Your Own API Key
+                      </p>
+                      <p className="text-xs text-gray-400">
+                        For Basic tier users, provide your own API key. Leave empty to use platform defaults.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="provider">Model Provider</Label>
+                    <Select
+                      value={formData.provider}
+                      onValueChange={(value) => setFormData({ ...formData, provider: value })}
+                    >
+                      <SelectTrigger className="bg-black/50 border-purple-500/30">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="google">Google (Gemini)</SelectItem>
+                        <SelectItem value="openai">OpenAI (ChatGPT)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="model_name">Model Name (Optional)</Label>
+                    <Input
+                      id="model_name"
+                      placeholder="e.g., gemini-2.0-flash-exp or gpt-4"
+                      value={formData.model_name}
+                      onChange={(e) => setFormData({ ...formData, model_name: e.target.value })}
+                      className="bg-black/50 border-purple-500/30"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="api_key">API Key (Optional)</Label>
+                    <Input
+                      id="api_key"
+                      type="password"
+                      placeholder="Your API key (not saved)"
+                      value={formData.api_key}
+                      onChange={(e) => setFormData({ ...formData, api_key: e.target.value })}
+                      className="bg-black/50 border-purple-500/30"
+                    />
+                  </div>
+                </div>
+
+                <Button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 text-white text-lg py-6"
+                >
+                  {loading ? (
+                    "Starting Demo..."
+                  ) : (
+                    <>
+                      Start Demo Game
+                      <ArrowRight className="ml-2 h-5 w-5" />
+                    </>
+                  )}
+                </Button>
+              </form>
+
+              <div className="mt-6 text-center">
+                <p className="text-sm text-gray-400">
+                  After this demo,{" "}
+                  <a href="/auth/register" className="text-purple-400 hover:text-purple-300 underline">
+                    register for full access
+                  </a>
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        </motion.div>
       </div>
     </div>
   )
-}
-
-interface Message {
-  role: "user" | "system"
-  content: string
 }

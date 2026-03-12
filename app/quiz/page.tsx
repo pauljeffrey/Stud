@@ -1,21 +1,32 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Input } from "@/components/ui/input"
-import { Textarea } from "@/components/ui/textarea"
-import { Label } from "@/components/ui/label"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Progress } from "@/components/ui/progress"
-import { Badge } from "@/components/ui/badge"
-import { Clock, Brain, CheckCircle, XCircle, Trophy, Star, Upload, FileText } from "lucide-react"
-import { useToast } from "@/components/ui/use-toast"
+import { useRouter } from "next/navigation"
+import { Button } from "@/app/components/ui/button"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/app/components/ui/card"
+import { Input } from "@/app/components/ui/input"
+import { Label } from "@/app/components/ui/label"
+import { Textarea } from "@/app/components/ui/textarea"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/app/components/ui/select"
+import { Progress } from "@/app/components/ui/progress"
+import { Badge } from "@/app/components/ui/badge"
+import {
+  Clock,
+  CheckCircle2,
+  XCircle,
+  Loader2,
+  ArrowRight,
+  ArrowLeft,
+  Trophy,
+  Brain,
+} from "lucide-react"
+import { useToast } from "@/app/components/ui/use-toast"
+import { motion, AnimatePresence } from "framer-motion"
 
-interface Question {
-  id: string
+interface QuizQuestion {
+  question_id: string
   question: string
-  type: "multiple_choice" | "true_false" | "open_ended"
+  type: "multiple_choice" | "open_ended"
   options?: string[]
   correct_answer: string
   explanation: string
@@ -24,561 +35,560 @@ interface Question {
 interface Quiz {
   id: string
   title: string
-  questions: Question[]
+  questions: QuizQuestion[]
   timeLimit: number
   totalQuestions: number
+  source: string
 }
 
 export default function QuizPage() {
-  const [quizMode, setQuizMode] = useState<"create" | "take" | null>(null)
-  const [quizType, setQuizType] = useState<"multiple_choice" | "true_false" | "open_ended">("multiple_choice")
-  const [numQuestions, setNumQuestions] = useState(10)
-  const [timeLimit, setTimeLimit] = useState(600) // 10 minutes
-  const [currentQuiz, setCurrentQuiz] = useState<Quiz | null>(null)
-  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0)
-  const [userAnswers, setUserAnswers] = useState<Record<string, string>>({})
-  const [timeRemaining, setTimeRemaining] = useState(0)
-  const [quizStarted, setQuizStarted] = useState(false)
-  const [quizCompleted, setQuizCompleted] = useState(false)
-  const [score, setScore] = useState(0)
-  const [isLoading, setIsLoading] = useState(false)
-  const [uploadedFile, setUploadedFile] = useState<File | null>(null)
+  const router = useRouter()
   const { toast } = useToast()
+  const [quiz, setQuiz] = useState<Quiz | null>(null)
+  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0)
+  const [answers, setAnswers] = useState<Record<string, string>>({})
+  const [timeRemaining, setTimeRemaining] = useState(0)
+  const [isLoading, setIsLoading] = useState(false)
+  const [isGenerating, setIsGenerating] = useState(false)
+  const [showResults, setShowResults] = useState(false)
+  const [scores, setScores] = useState<Record<string, number>>({})
+  const [modelConfig, setModelConfig] = useState({
+    model_name: "",
+    api_key: "",
+    provider: "google"
+  })
+  const [quizConfig, setQuizConfig] = useState({
+    quiz_type: "general",
+    num_questions: 10,
+    num_multiple_choice: 7,
+    num_open_ended: 3,
+    time_limit: 300,
+    source: "ai_knowledge" as "ai_knowledge" | "document",
+    document_id: ""
+  })
 
-  // Timer effect
   useEffect(() => {
-    if (quizStarted && timeRemaining > 0 && !quizCompleted) {
+    if (quiz && quiz.timeLimit > 0) {
+      setTimeRemaining(quiz.timeLimit)
+    }
+  }, [quiz])
+
+  useEffect(() => {
+    if (timeRemaining > 0 && quiz && !showResults) {
       const timer = setInterval(() => {
         setTimeRemaining((prev) => {
           if (prev <= 1) {
-            completeQuiz()
+            handleTimeUp()
             return 0
           }
           return prev - 1
         })
       }, 1000)
-
       return () => clearInterval(timer)
     }
-  }, [quizStarted, timeRemaining, quizCompleted])
+  }, [timeRemaining, quiz, showResults])
 
-  const generateQuiz = async () => {
-    setIsLoading(true)
+  const handleGenerateQuiz = async () => {
+    setIsGenerating(true)
     try {
-      const formData = new FormData()
-      formData.append("quiz_type", quizType)
-      formData.append("num_questions", numQuestions.toString())
-      formData.append("time_limit", timeLimit.toString())
-
-      if (uploadedFile) {
-        formData.append("file", uploadedFile)
-      }
-
       const response = await fetch("/api/quiz/generate", {
         method: "POST",
-        body: formData,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          quiz_type: quizConfig.quiz_type,
+          num_questions: quizConfig.num_questions,
+          time_limit: quizConfig.time_limit,
+          file: null,
+          ...(quizConfig.source === "document" && quizConfig.document_id ? { document_id: quizConfig.document_id } : {}),
+          quiz_type: quizConfig.quiz_type,
+          num_questions: quizConfig.num_questions,
+          num_multiple_choice: quizConfig.num_multiple_choice,
+          num_open_ended: quizConfig.num_open_ended,
+          time_limit: quizConfig.time_limit,
+          source: quizConfig.source,
+          document_id: quizConfig.document_id || undefined,
+          model_name: modelConfig.model_name || undefined,
+          api_key: modelConfig.api_key || undefined,
+          provider: modelConfig.provider,
+          use_internet: true
+        })
       })
 
-      if (!response.ok) {
-        throw new Error("Failed to generate quiz")
-      }
+      if (!response.ok) throw new Error("Failed to generate quiz")
 
-      const quiz = await response.json()
-      setCurrentQuiz(quiz)
-      setQuizMode("take")
+      const data = await response.json()
+      setQuiz(data)
+      setCurrentQuestionIndex(0)
+      setAnswers({})
+      setShowResults(false)
+      setScores({})
 
       toast({
         title: "Quiz Generated",
-        description: `Created a ${numQuestions}-question ${quizType.replace("_", " ")} quiz.`,
+        description: `Created ${data.totalQuestions} questions`
       })
-    } catch (error) {
-      console.error("Quiz generation error:", error)
+    } catch (error: any) {
       toast({
         title: "Error",
-        description: "Failed to generate quiz. Please try again.",
-        variant: "destructive",
+        description: error.message || "Failed to generate quiz",
+        variant: "destructive"
+      })
+    } finally {
+      setIsGenerating(false)
+    }
+  }
+
+  const handleTimeUp = () => {
+    toast({
+      title: "Time's Up!",
+      description: "Moving to next question",
+      variant: "destructive"
+    })
+    handleNext()
+  }
+
+  const handleAnswerChange = (questionId: string, answer: string) => {
+    setAnswers((prev) => ({ ...prev, [questionId]: answer }))
+  }
+
+  const handleNext = () => {
+    if (quiz && currentQuestionIndex < quiz.questions.length - 1) {
+      setCurrentQuestionIndex((prev) => prev + 1)
+      setTimeRemaining(quiz.timeLimit)
+    }
+  }
+
+  const handlePrevious = () => {
+    if (currentQuestionIndex > 0) {
+      setCurrentQuestionIndex((prev) => prev - 1)
+      setTimeRemaining(quiz?.timeLimit || 300)
+    }
+  }
+
+  const handleSubmitQuiz = async () => {
+    if (!quiz) return
+
+    setIsLoading(true)
+    try {
+      // Score answers
+      const scoredAnswers: Record<string, any> = {}
+      const newScores: Record<string, number> = {}
+
+      for (const question of quiz.questions) {
+        const userAnswer = answers[question.question_id] || ""
+        scoredAnswers[question.question_id] = userAnswer
+
+        if (question.type === "multiple_choice") {
+          // Simple scoring for multiple choice
+          newScores[question.question_id] = userAnswer === question.correct_answer ? 10 : 0
+        } else {
+          // Score open-ended using AI
+          try {
+            const scoreResponse = await fetch("/api/quiz/score-open", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                question: question.question,
+                correct_answer: question.correct_answer,
+                user_answer: userAnswer,
+                model_name: modelConfig.model_name || undefined,
+                api_key: modelConfig.api_key || undefined,
+                provider: modelConfig.provider
+              })
+            })
+
+            if (scoreResponse.ok) {
+              const scoreData = await scoreResponse.json()
+              newScores[question.question_id] = scoreData.score
+            } else {
+              newScores[question.question_id] = 5 // Default score
+            }
+          } catch {
+            newScores[question.question_id] = 5
+          }
+        }
+      }
+
+      setScores(newScores)
+
+      // Submit to backend
+      const totalScore = Object.values(newScores).reduce((a, b) => a + b, 0) / quiz.questions.length
+
+      await fetch("/api/quiz/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          quiz_id: quiz.id,
+          answers: scoredAnswers,
+          scores: newScores,
+          total_score: totalScore,
+          time_spent: quiz.timeLimit - timeRemaining
+        })
+      })
+
+      setShowResults(true)
+      toast({
+        title: "Quiz Submitted",
+        description: `Your score: ${totalScore.toFixed(1)}/10`
+      })
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to submit quiz",
+        variant: "destructive"
       })
     } finally {
       setIsLoading(false)
     }
   }
 
-  const startQuiz = () => {
-    if (!currentQuiz) return
-
-    setQuizStarted(true)
-    setTimeRemaining(currentQuiz.timeLimit)
-    setCurrentQuestionIndex(0)
-    setUserAnswers({})
-    setQuizCompleted(false)
-    setScore(0)
-  }
-
-  const answerQuestion = (questionId: string, answer: string) => {
-    setUserAnswers((prev) => ({
-      ...prev,
-      [questionId]: answer,
-    }))
-  }
-
-  const nextQuestion = () => {
-    if (currentQuiz && currentQuestionIndex < currentQuiz.questions.length - 1) {
-      setCurrentQuestionIndex((prev) => prev + 1)
-    } else {
-      completeQuiz()
-    }
-  }
-
-  const previousQuestion = () => {
-    if (currentQuestionIndex > 0) {
-      setCurrentQuestionIndex((prev) => prev - 1)
-    }
-  }
-
-  const completeQuiz = async () => {
-    if (!currentQuiz) return
-
-    setQuizCompleted(true)
-    setQuizStarted(false)
-
-    // Calculate score
-    let correctAnswers = 0
-    currentQuiz.questions.forEach((question) => {
-      const userAnswer = userAnswers[question.id]
-      if (userAnswer && userAnswer.toLowerCase().trim() === question.correct_answer.toLowerCase().trim()) {
-        correctAnswers++
-      }
-    })
-
-    const finalScore = Math.round((correctAnswers / currentQuiz.questions.length) * 100)
-    setScore(finalScore)
-
-    // Save quiz result
-    try {
-      await fetch("/api/quiz/submit", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          quizId: currentQuiz.id,
-          answers: userAnswers,
-          score: finalScore,
-          timeSpent: currentQuiz.timeLimit - timeRemaining,
-        }),
-      })
-    } catch (error) {
-      console.error("Failed to save quiz result:", error)
-    }
-
-    toast({
-      title: "Quiz Completed!",
-      description: `You scored ${finalScore}% (${correctAnswers}/${currentQuiz.questions.length} correct)`,
-    })
-  }
-
-  const formatTime = (seconds: number): string => {
+  const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60)
     const secs = seconds % 60
     return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`
   }
 
-  const resetQuiz = () => {
-    setQuizMode(null)
-    setCurrentQuiz(null)
-    setQuizStarted(false)
-    setQuizCompleted(false)
-    setCurrentQuestionIndex(0)
-    setUserAnswers({})
-    setTimeRemaining(0)
-    setScore(0)
-    setUploadedFile(null)
-  }
+  const currentQuestion = quiz?.questions[currentQuestionIndex]
+  const progress = quiz ? ((currentQuestionIndex + 1) / quiz.questions.length) * 100 : 0
 
-  if (quizCompleted && currentQuiz) {
+  if (!quiz) {
     return (
-      <div className="min-h-screen bg-gradient-to-b from-purple-900 to-purple-700 p-4">
-        <div className="max-w-4xl mx-auto">
-          <Card className="bg-white/10 backdrop-blur-sm border-purple-400 text-white">
-            <CardHeader className="text-center">
-              <CardTitle className="text-3xl mb-4">Quiz Completed!</CardTitle>
-              <div className="flex justify-center mb-4">
-                <Trophy className="h-16 w-16 text-yellow-400" />
-              </div>
-            </CardHeader>
-            <CardContent className="text-center space-y-6">
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                <div className="bg-purple-800 p-6 rounded-lg">
-                  <Star className="h-8 w-8 mx-auto mb-2 text-yellow-400" />
-                  <p className="text-2xl font-bold">{score}%</p>
-                  <p className="text-purple-200">Final Score</p>
-                </div>
-                <div className="bg-purple-800 p-6 rounded-lg">
-                  <CheckCircle className="h-8 w-8 mx-auto mb-2 text-green-400" />
-                  <p className="text-2xl font-bold">
-                    {
-                      currentQuiz.questions.filter(
-                        (q) => userAnswers[q.id]?.toLowerCase().trim() === q.correct_answer.toLowerCase().trim(),
-                      ).length
-                    }
-                  </p>
-                  <p className="text-purple-200">Correct Answers</p>
-                </div>
-                <div className="bg-purple-800 p-6 rounded-lg">
-                  <Clock className="h-8 w-8 mx-auto mb-2 text-blue-400" />
-                  <p className="text-2xl font-bold">{formatTime(currentQuiz.timeLimit - timeRemaining)}</p>
-                  <p className="text-purple-200">Time Taken</p>
-                </div>
-              </div>
-
-              {/* Review Answers */}
-              <div className="text-left">
-                <h3 className="text-xl font-semibold mb-4">Review Your Answers</h3>
-                <div className="space-y-4 max-h-96 overflow-y-auto">
-                  {currentQuiz.questions.map((question, index) => {
-                    const userAnswer = userAnswers[question.id]
-                    const isCorrect = userAnswer?.toLowerCase().trim() === question.correct_answer.toLowerCase().trim()
-
-                    return (
-                      <div key={question.id} className="bg-purple-800 p-4 rounded-lg">
-                        <div className="flex items-start gap-3">
-                          {isCorrect ? (
-                            <CheckCircle className="h-5 w-5 text-green-400 mt-1 flex-shrink-0" />
-                          ) : (
-                            <XCircle className="h-5 w-5 text-red-400 mt-1 flex-shrink-0" />
-                          )}
-                          <div className="flex-1">
-                            <p className="font-semibold mb-2">
-                              Q{index + 1}: {question.question}
-                            </p>
-                            <p className="text-sm text-purple-200 mb-1">
-                              Your answer:{" "}
-                              <span className={isCorrect ? "text-green-400" : "text-red-400"}>
-                                {userAnswer || "No answer"}
-                              </span>
-                            </p>
-                            <p className="text-sm text-purple-200 mb-2">
-                              Correct answer: <span className="text-green-400">{question.correct_answer}</span>
-                            </p>
-                            <p className="text-sm text-purple-300">{question.explanation}</p>
-                          </div>
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-              </div>
-
-              <div className="flex gap-4 justify-center">
-                <Button onClick={resetQuiz} className="bg-purple-600 hover:bg-purple-700">
-                  Take Another Quiz
-                </Button>
-                <Button variant="outline" className="border-purple-400 text-white hover:bg-purple-800 bg-transparent">
-                  View Dashboard
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      </div>
-    )
-  }
-
-  if (quizStarted && currentQuiz) {
-    const currentQuestion = currentQuiz.questions[currentQuestionIndex]
-    const progress = ((currentQuestionIndex + 1) / currentQuiz.questions.length) * 100
-
-    return (
-      <div className="min-h-screen bg-gradient-to-b from-purple-900 to-purple-700 p-4">
-        <div className="max-w-4xl mx-auto">
-          {/* Quiz Header */}
-          <div className="flex justify-between items-center mb-6">
-            <div>
-              <h1 className="text-2xl font-bold text-white">Medical Quiz</h1>
-              <p className="text-purple-200">
-                Question {currentQuestionIndex + 1} of {currentQuiz.questions.length}
+      <div className="min-h-screen bg-gradient-to-b from-black via-[#1E3A8A] to-[#8B5CF6] text-white p-4">
+        <div className="container mx-auto max-w-2xl py-12">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.8 }}
+          >
+            <div className="text-center mb-8">
+              <Brain className="h-16 w-16 mx-auto mb-4 text-purple-400" />
+              <h1 className="text-4xl md:text-5xl font-bold mb-4 bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">
+                Quiz Mode
+              </h1>
+              <p className="text-gray-300 text-lg">
+                Generate AI-powered quizzes from knowledge or documents
               </p>
             </div>
-            <div className="flex items-center gap-4">
-              <div className="text-white text-right">
-                <p className="text-sm text-purple-200">Time Remaining</p>
-                <p className="text-xl font-bold">{formatTime(timeRemaining)}</p>
-              </div>
-              <Button
-                onClick={completeQuiz}
-                variant="outline"
-                className="border-purple-400 text-white hover:bg-purple-800 bg-transparent"
-              >
-                Submit Quiz
-              </Button>
-            </div>
-          </div>
 
-          {/* Progress Bar */}
-          <div className="mb-6">
-            <Progress value={progress} className="h-2" />
-          </div>
-
-          {/* Question Card */}
-          <Card className="bg-white/10 backdrop-blur-sm border-purple-400 text-white">
-            <CardHeader>
-              <CardTitle className="text-xl">{currentQuestion.question}</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {currentQuestion.type === "multiple_choice" && currentQuestion.options && (
-                <div className="space-y-3">
-                  {currentQuestion.options.map((option, index) => (
-                    <div
-                      key={index}
-                      className={`p-3 rounded-lg border cursor-pointer transition-colors ${
-                        userAnswers[currentQuestion.id] === option
-                          ? "bg-purple-600 border-purple-400"
-                          : "bg-purple-800 border-purple-600 hover:bg-purple-700"
-                      }`}
-                      onClick={() => answerQuestion(currentQuestion.id, option)}
-                    >
-                      <p>{option}</p>
-                    </div>
-                  ))}
+            <Card className="bg-black/40 backdrop-blur-md border-purple-500/30">
+              <CardHeader>
+                <CardTitle>Quiz Configuration</CardTitle>
+                <CardDescription className="text-gray-400">
+                  Configure your quiz settings
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label>Quiz Type</Label>
+                    <Input
+                      value={quizConfig.quiz_type}
+                      onChange={(e) => setQuizConfig({ ...quizConfig, quiz_type: e.target.value })}
+                      placeholder="e.g., anatomy, pharmacology"
+                      className="bg-black/50 border-purple-500/30"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Total Questions</Label>
+                    <Input
+                      type="number"
+                      value={quizConfig.num_questions}
+                      onChange={(e) => setQuizConfig({ ...quizConfig, num_questions: parseInt(e.target.value) })}
+                      className="bg-black/50 border-purple-500/30"
+                    />
+                  </div>
                 </div>
-              )}
 
-              {currentQuestion.type === "true_false" && (
-                <div className="space-y-3">
-                  {["True", "False"].map((option) => (
-                    <div
-                      key={option}
-                      className={`p-3 rounded-lg border cursor-pointer transition-colors ${
-                        userAnswers[currentQuestion.id] === option
-                          ? "bg-purple-600 border-purple-400"
-                          : "bg-purple-800 border-purple-600 hover:bg-purple-700"
-                      }`}
-                      onClick={() => answerQuestion(currentQuestion.id, option)}
-                    >
-                      <p>{option}</p>
-                    </div>
-                  ))}
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label>Multiple Choice</Label>
+                    <Input
+                      type="number"
+                      value={quizConfig.num_multiple_choice}
+                      onChange={(e) => setQuizConfig({ ...quizConfig, num_multiple_choice: parseInt(e.target.value) })}
+                      className="bg-black/50 border-purple-500/30"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Open-ended</Label>
+                    <Input
+                      type="number"
+                      value={quizConfig.num_open_ended}
+                      onChange={(e) => setQuizConfig({ ...quizConfig, num_open_ended: parseInt(e.target.value) })}
+                      className="bg-black/50 border-purple-500/30"
+                    />
+                  </div>
                 </div>
-              )}
 
-              {currentQuestion.type === "open_ended" && (
-                <Textarea
-                  value={userAnswers[currentQuestion.id] || ""}
-                  onChange={(e) => answerQuestion(currentQuestion.id, e.target.value)}
-                  placeholder="Type your answer here..."
-                  className="bg-purple-800 border-purple-600 text-white placeholder-purple-300"
-                  rows={4}
-                />
-              )}
+                <div className="space-y-2">
+                  <Label>Time Limit (seconds per question)</Label>
+                  <Input
+                    type="number"
+                    value={quizConfig.time_limit}
+                    onChange={(e) => setQuizConfig({ ...quizConfig, time_limit: parseInt(e.target.value) })}
+                    className="bg-black/50 border-purple-500/30"
+                  />
+                </div>
 
-              {/* Navigation */}
-              <div className="flex justify-between pt-4">
+                <div className="space-y-2">
+                  <Label>Source</Label>
+                  <Select
+                    value={quizConfig.source}
+                    onValueChange={(value: "ai_knowledge" | "document") => setQuizConfig({ ...quizConfig, source: value })}
+                  >
+                    <SelectTrigger className="bg-black/50 border-purple-500/30">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="ai_knowledge">AI Knowledge</SelectItem>
+                      <SelectItem value="document">From Document</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                {quizConfig.source === "document" && (
+                  <div className="space-y-2">
+                    <Label>Document ID</Label>
+                    <Input
+                      value={quizConfig.document_id}
+                      onChange={(e) => setQuizConfig({ ...quizConfig, document_id: e.target.value })}
+                      placeholder="Enter document ID"
+                      className="bg-black/50 border-purple-500/30"
+                    />
+                  </div>
+                )}
+
+                <div className="bg-purple-900/30 border border-purple-500/30 rounded-lg p-4 space-y-2">
+                  <Label className="text-sm text-purple-300">Model Configuration (Optional)</Label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <Select
+                      value={modelConfig.provider}
+                      onValueChange={(value) => setModelConfig({ ...modelConfig, provider: value })}
+                    >
+                      <SelectTrigger className="bg-black/50 border-purple-500/30 text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="google">Google</SelectItem>
+                        <SelectItem value="openai">OpenAI</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <Input
+                      placeholder="API key"
+                      type="password"
+                      value={modelConfig.api_key}
+                      onChange={(e) => setModelConfig({ ...modelConfig, api_key: e.target.value })}
+                      className="bg-black/50 border-purple-500/30 text-xs"
+                    />
+                  </div>
+                </div>
+
                 <Button
-                  onClick={previousQuestion}
-                  disabled={currentQuestionIndex === 0}
-                  variant="outline"
-                  className="border-purple-400 text-white hover:bg-purple-800 bg-transparent"
+                  onClick={handleGenerateQuiz}
+                  disabled={isGenerating}
+                  className="w-full bg-gradient-to-r from-purple-600 to-pink-600 text-lg py-6"
                 >
-                  Previous
+                  {isGenerating ? (
+                    <>
+                      <Loader2 className="h-5 w-5 mr-2 animate-spin" />
+                      Generating Quiz...
+                    </>
+                  ) : (
+                    <>
+                      <Brain className="h-5 w-5 mr-2" />
+                      Generate Quiz
+                    </>
+                  )}
                 </Button>
-                <Button
-                  onClick={nextQuestion}
-                  className="bg-purple-600 hover:bg-purple-700"
-                  disabled={!userAnswers[currentQuestion.id]}
-                >
-                  {currentQuestionIndex === currentQuiz.questions.length - 1 ? "Finish" : "Next"}
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
+              </CardContent>
+            </Card>
+          </motion.div>
         </div>
       </div>
     )
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-purple-900 to-purple-700 p-4">
-      <div className="max-w-4xl mx-auto">
-        <div className="mb-8">
-          <h1 className="text-4xl font-bold text-white mb-2">Medical Quiz</h1>
-          <p className="text-purple-200">Test your medical knowledge with AI-generated quizzes</p>
+    <div className="min-h-screen bg-gradient-to-b from-black via-[#1E3A8A] to-[#8B5CF6] text-white p-4">
+      <div className="container mx-auto max-w-4xl">
+        {/* Header */}
+        <div className="mb-6 flex items-center justify-between">
+          <div>
+            <h1 className="text-3xl font-bold mb-2">{quiz.title}</h1>
+            <div className="flex items-center gap-4 text-sm text-gray-300">
+              <span>Question {currentQuestionIndex + 1} of {quiz.questions.length}</span>
+              <Badge className="bg-purple-600">{quiz.source === "ai_knowledge" ? "AI Knowledge" : "Document"}</Badge>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 text-red-400">
+            <Clock className="h-5 w-5" />
+            <span className="font-mono text-xl">{formatTime(timeRemaining)}</span>
+          </div>
         </div>
 
-        {!quizMode && (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <Card
-              className="bg-white/10 backdrop-blur-sm border-purple-400 text-white cursor-pointer hover:bg-white/20 transition-colors"
-              onClick={() => setQuizMode("create")}
-            >
-              <CardContent className="p-8 text-center">
-                <Brain className="h-16 w-16 mx-auto mb-4 text-purple-400" />
-                <h3 className="text-2xl font-bold mb-2">Generate New Quiz</h3>
-                <p className="text-purple-200">Create a custom quiz with AI-generated questions</p>
-              </CardContent>
-            </Card>
+        {/* Progress Bar */}
+        <Progress value={progress} className="mb-6 h-2 bg-black/30" />
 
-            <Card className="bg-white/10 backdrop-blur-sm border-purple-400 text-white opacity-60">
-              <CardContent className="p-8 text-center">
-                <Trophy className="h-16 w-16 mx-auto mb-4 text-purple-400" />
-                <h3 className="text-2xl font-bold mb-2">Saved Quizzes</h3>
-                <p className="text-purple-200">Access your previously taken quizzes</p>
-                <Badge className="mt-2 bg-yellow-600">Coming Soon</Badge>
-              </CardContent>
-            </Card>
-          </div>
-        )}
-
-        {quizMode === "create" && (
-          <Card className="bg-white/10 backdrop-blur-sm border-purple-400 text-white">
+        {showResults ? (
+          /* Results View */
+          <Card className="bg-black/40 backdrop-blur-md border-purple-500/30">
             <CardHeader>
-              <CardTitle>Create New Quiz</CardTitle>
-              <CardDescription className="text-purple-200">
-                Configure your quiz settings and generate questions
-              </CardDescription>
+              <CardTitle className="flex items-center gap-2">
+                <Trophy className="h-6 w-6 text-yellow-400" />
+                Quiz Results
+              </CardTitle>
             </CardHeader>
-            <CardContent className="space-y-6">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div>
-                  <Label htmlFor="quizType">Quiz Type</Label>
-                  <Select value={quizType} onValueChange={(value: any) => setQuizType(value)}>
-                    <SelectTrigger className="bg-purple-800 border-purple-600 text-white">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="multiple_choice">Multiple Choice</SelectItem>
-                      <SelectItem value="true_false">True/False</SelectItem>
-                      <SelectItem value="open_ended">Open Ended</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
+            <CardContent className="space-y-4">
+              {quiz.questions.map((question, idx) => {
+                const userAnswer = answers[question.question_id] || "No answer"
+                const score = scores[question.question_id] || 0
+                const isCorrect = question.type === "multiple_choice" && userAnswer === question.correct_answer
 
-                <div>
-                  <Label htmlFor="numQuestions">Number of Questions</Label>
-                  <Input
-                    id="numQuestions"
-                    type="number"
-                    min="5"
-                    max="50"
-                    value={numQuestions}
-                    onChange={(e) => setNumQuestions(Number.parseInt(e.target.value))}
-                    className="bg-purple-800 border-purple-600 text-white"
-                  />
-                </div>
-
-                <div>
-                  <Label htmlFor="timeLimit">Time Limit (minutes)</Label>
-                  <Input
-                    id="timeLimit"
-                    type="number"
-                    min="5"
-                    max="120"
-                    value={timeLimit / 60}
-                    onChange={(e) => setTimeLimit(Number.parseInt(e.target.value) * 60)}
-                    className="bg-purple-800 border-purple-600 text-white"
-                  />
-                </div>
-
-                <div>
-                  <Label htmlFor="difficulty">Difficulty Level</Label>
-                  <Select defaultValue="intermediate">
-                    <SelectTrigger className="bg-purple-800 border-purple-600 text-white">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="beginner">Beginner</SelectItem>
-                      <SelectItem value="intermediate">Intermediate</SelectItem>
-                      <SelectItem value="advanced">Advanced</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
-
-              {/* Optional File Upload */}
-              <div>
-                <Label>Upload Study Material (Optional)</Label>
-                <div className="mt-2">
-                  <input
-                    type="file"
-                    accept=".pdf,.doc,.docx,.txt"
-                    onChange={(e) => setUploadedFile(e.target.files?.[0] || null)}
-                    className="hidden"
-                    id="file-upload"
-                  />
-                  <label
-                    htmlFor="file-upload"
-                    className="flex items-center gap-2 p-3 border-2 border-dashed border-purple-600 rounded-lg cursor-pointer hover:border-purple-400 transition-colors"
+                return (
+                  <div
+                    key={question.question_id}
+                    className="border border-purple-500/30 rounded-lg p-4 bg-black/30"
                   >
-                    <Upload className="h-5 w-5" />
-                    <span>{uploadedFile ? uploadedFile.name : "Choose file to generate questions from"}</span>
-                  </label>
-                </div>
-              </div>
+                    <div className="flex items-start justify-between mb-2">
+                      <h3 className="font-semibold">Question {idx + 1}</h3>
+                      <div className="flex items-center gap-2">
+                        {isCorrect ? (
+                          <CheckCircle2 className="h-5 w-5 text-green-400" />
+                        ) : (
+                          <XCircle className="h-5 w-5 text-red-400" />
+                        )}
+                        <Badge className={score >= 7 ? "bg-green-600" : score >= 5 ? "bg-yellow-600" : "bg-red-600"}>
+                          {score.toFixed(1)}/10
+                        </Badge>
+                      </div>
+                    </div>
+                    <p className="mb-2">{question.question}</p>
+                    <div className="space-y-1 text-sm">
+                      <p className="text-gray-400">Your answer: {userAnswer}</p>
+                      <p className="text-green-400">Correct: {question.correct_answer}</p>
+                      <p className="text-blue-400 mt-2">{question.explanation}</p>
+                    </div>
+                  </div>
+                )
+              })}
 
-              <div className="flex gap-4">
-                <Button onClick={generateQuiz} disabled={isLoading} className="bg-purple-600 hover:bg-purple-700">
-                  {isLoading ? "Generating..." : "Generate Quiz"}
-                </Button>
-                <Button
-                  onClick={() => setQuizMode(null)}
-                  variant="outline"
-                  className="border-purple-400 text-white hover:bg-purple-800"
-                >
-                  Cancel
-                </Button>
+              <div className="mt-6 pt-6 border-t border-purple-500/30">
+                <div className="text-center">
+                  <p className="text-2xl font-bold mb-2">
+                    Total Score: {(Object.values(scores).reduce((a, b) => a + b, 0) / quiz.questions.length).toFixed(1)}/10
+                  </p>
+                  <div className="flex gap-2 justify-center mt-4">
+                    <Button
+                      onClick={() => {
+                        setQuiz(null)
+                        setShowResults(false)
+                        setAnswers({})
+                        setScores({})
+                      }}
+                      variant="outline"
+                      className="border-purple-500/30"
+                    >
+                      New Quiz
+                    </Button>
+                    <Button
+                      onClick={() => router.push("/dashboard")}
+                      className="bg-gradient-to-r from-purple-600 to-pink-600"
+                    >
+                      View Dashboard
+                    </Button>
+                  </div>
+                </div>
               </div>
             </CardContent>
           </Card>
-        )}
+        ) : (
+          /* Question View */
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={currentQuestionIndex}
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -20 }}
+              transition={{ duration: 0.3 }}
+            >
+              <Card className="bg-black/40 backdrop-blur-md border-purple-500/30">
+                <CardHeader>
+                  <CardTitle className="flex items-center justify-between">
+                    <span>Question {currentQuestionIndex + 1}</span>
+                    <Badge className={currentQuestion?.type === "multiple_choice" ? "bg-blue-600" : "bg-purple-600"}>
+                      {currentQuestion?.type === "multiple_choice" ? "Multiple Choice" : "Open-ended"}
+                    </Badge>
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-6">
+                  <p className="text-lg">{currentQuestion?.question}</p>
 
-        {quizMode === "take" && currentQuiz && !quizStarted && (
-          <Card className="bg-white/10 backdrop-blur-sm border-purple-400 text-white">
-            <CardHeader>
-              <CardTitle>Quiz Ready!</CardTitle>
-              <CardDescription className="text-purple-200">Review the quiz details before starting</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-6">
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                <div className="bg-purple-800 p-4 rounded-lg text-center">
-                  <Brain className="h-8 w-8 mx-auto mb-2 text-purple-400" />
-                  <p className="text-lg font-bold">{currentQuiz.questions.length}</p>
-                  <p className="text-sm text-purple-200">Questions</p>
-                </div>
-                <div className="bg-purple-800 p-4 rounded-lg text-center">
-                  <Clock className="h-8 w-8 mx-auto mb-2 text-blue-400" />
-                  <p className="text-lg font-bold">{currentQuiz.timeLimit / 60} min</p>
-                  <p className="text-sm text-purple-200">Time Limit</p>
-                </div>
-                <div className="bg-purple-800 p-4 rounded-lg text-center">
-                  <FileText className="h-8 w-8 mx-auto mb-2 text-green-400" />
-                  <p className="text-lg font-bold">{quizType.replace("_", " ")}</p>
-                  <p className="text-sm text-purple-200">Question Type</p>
-                </div>
-              </div>
+                  {currentQuestion?.type === "multiple_choice" && currentQuestion.options ? (
+                    <div className="space-y-2">
+                      {currentQuestion.options.map((option, idx) => (
+                        <Button
+                          key={idx}
+                          variant={
+                            answers[currentQuestion.question_id] === option ? "default" : "outline"
+                          }
+                          className="w-full justify-start text-left bg-black/50 border-purple-500/30 hover:bg-purple-600/30"
+                          onClick={() => handleAnswerChange(currentQuestion.question_id, option)}
+                        >
+                          {String.fromCharCode(65 + idx)}. {option}
+                        </Button>
+                      ))}
+                    </div>
+                  ) : (
+                    <Textarea
+                      value={answers[currentQuestion?.question_id || ""] || ""}
+                      onChange={(e) => handleAnswerChange(currentQuestion?.question_id || "", e.target.value)}
+                      placeholder="Type your answer here..."
+                      className="bg-black/50 border-purple-500/30 min-h-[200px]"
+                    />
+                  )}
 
-              <div className="bg-purple-800 p-4 rounded-lg">
-                <h4 className="font-semibold mb-2">Instructions:</h4>
-                <ul className="text-sm text-purple-200 space-y-1">
-                  <li>• Answer all questions to the best of your ability</li>
-                  <li>• You can navigate between questions using Previous/Next buttons</li>
-                  <li>• Your progress is automatically saved</li>
-                  <li>• The quiz will auto-submit when time runs out</li>
-                </ul>
-              </div>
-
-              <div className="flex gap-4">
-                <Button onClick={startQuiz} className="bg-green-600 hover:bg-green-700">
-                  Start Quiz
-                </Button>
-                <Button
-                  onClick={() => setQuizMode("create")}
-                  variant="outline"
-                  className="border-purple-400 text-white hover:bg-purple-800"
-                >
-                  Modify Settings
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
+                  <div className="flex justify-between">
+                    <Button
+                      onClick={handlePrevious}
+                      disabled={currentQuestionIndex === 0}
+                      variant="outline"
+                      className="border-purple-500/30"
+                    >
+                      <ArrowLeft className="h-4 w-4 mr-2" />
+                      Previous
+                    </Button>
+                    {currentQuestionIndex === quiz.questions.length - 1 ? (
+                      <Button
+                        onClick={handleSubmitQuiz}
+                        disabled={isLoading}
+                        className="bg-gradient-to-r from-purple-600 to-pink-600"
+                      >
+                        {isLoading ? (
+                          <>
+                            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                            Submitting...
+                          </>
+                        ) : (
+                          <>
+                            Submit Quiz
+                            <Trophy className="h-4 w-4 ml-2" />
+                          </>
+                        )}
+                      </Button>
+                    ) : (
+                      <Button
+                        onClick={handleNext}
+                        className="bg-gradient-to-r from-purple-600 to-pink-600"
+                      >
+                        Next
+                        <ArrowRight className="h-4 w-4 ml-2" />
+                      </Button>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+            </motion.div>
+          </AnimatePresence>
         )}
       </div>
     </div>

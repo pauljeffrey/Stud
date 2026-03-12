@@ -2,16 +2,16 @@ import type React from "react"
 import type { Metadata } from "next"
 import { Inter } from "next/font/google"
 import "./globals.css"
-import { ThemeProvider } from "@/components/theme-provider"
-import Navbar from "@/components/navbar"
-import { Toaster } from "@/components/ui/toaster"
+import { ThemeProvider } from "@/app/components/theme-provider"
+import Navbar from "@/app/components/navbar"
+import { Toaster } from "@/app/components/ui/toaster"
 
 const inter = Inter({ subsets: ["latin"] })
 
 export const metadata: Metadata = {
-  title: "MediQuest - Medical Role-Playing Game",
-  description: "An immersive medical role-playing experience where you diagnose, treat, and save lives",
-    generator: 'v0.dev'
+  title: "Stud - Master Medicine Through Adventure",
+  description: "A futuristic, gamified medical education platform with immersive role-playing, document chat, and AI-powered quizzes",
+  generator: 'v0.dev'
 }
 
 export default function RootLayout({
