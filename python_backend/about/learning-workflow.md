@@ -178,8 +178,9 @@ async def generate_response():
     # 4. Agent generates response using retrieved context
     # 5. Includes source citations
     
-    result = await rag_agent.answer_question(
-        question=message,
+    result = await rag_agent.chat(
+        user_id=user_id,
+        user_message=message,
         document_id=document_id,
         chat_history=chat_history[-5:]  # Last 5 messages
     )

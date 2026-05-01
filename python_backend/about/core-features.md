@@ -21,7 +21,7 @@ Stud is an immersive, gamified medical education platform that combines AI-power
   - **Game Master Agent**: Generates 20-50 unique clinical cases per adventure, manages achievements, and orchestrates game flow
   - **State Controller Agent**: Dynamically escalates/de-escalates cases based on user performance (5-15 changes per case)
   - **NPC Agent**: Non-playable characters that help users identify symptoms and reach diagnoses
-  - **Dice Agent**: Applies dramatic scenario changes based on dice rolls (1-6)
+  - **Dice roll**: Applies escalation/de-escalation based on a 0-10 roll (when enabled)
 
 - **Progressive Difficulty**: Cases adapt based on user performance
 - **Achievement System**: Career growth, promotions, financial rewards, certifications

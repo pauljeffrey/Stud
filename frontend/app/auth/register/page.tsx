@@ -13,6 +13,91 @@ import { useToast } from "@/app/components/ui/use-toast"
 import { Loader2 } from "lucide-react"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/app/components/ui/select"
 import { motion } from "framer-motion"
+import { saveAuth } from "@/app/lib/auth"
+
+// Exhaustive list of health/biological professions
+const PROFESSION_OPTIONS = [
+  "Physician (MD/DO)",
+  "Surgeon",
+  "Anesthesiologist",
+  "Radiologist",
+  "Pathologist",
+  "Psychiatrist",
+  "Pediatrician",
+  "Obstetrician/Gynecologist",
+  "Cardiologist",
+  "Neurologist",
+  "Orthopedic Surgeon",
+  "Emergency Medicine Physician",
+  "Family Medicine Physician",
+  "Internal Medicine Physician",
+  "Dermatologist",
+  "Ophthalmologist",
+  "Otolaryngologist (ENT)",
+  "Urologist",
+  "Pulmonologist",
+  "Gastroenterologist",
+  "Nephrologist",
+  "Endocrinologist",
+  "Rheumatologist",
+  "Oncologist",
+  "Infectious Disease Specialist",
+  "Registered Nurse (RN)",
+  "Licensed Practical Nurse (LPN)",
+  "Nurse Practitioner (NP)",
+  "Nurse Anesthetist (CRNA)",
+  "Nurse Midwife (CNM)",
+  "Physician Assistant (PA)",
+  "Medical Assistant",
+  "Pharmacist",
+  "Pharmacy Technician",
+  "Physical Therapist (PT)",
+  "Occupational Therapist (OT)",
+  "Speech-Language Pathologist",
+  "Respiratory Therapist",
+  "Radiologic Technologist",
+  "Medical Laboratory Scientist",
+  "Phlebotomist",
+  "Paramedic",
+  "Emergency Medical Technician (EMT)",
+  "Dental Hygienist",
+  "Dentist",
+  "Veterinarian",
+  "Biomedical Scientist",
+  "Clinical Research Associate",
+  "Healthcare Administrator",
+  "Medical Coder",
+  "Other",
+]
+
+// Exhaustive list of student fields
+const STUDENT_FIELD_OPTIONS = [
+  "Medical Student (MD/DO)",
+  "Nursing Student (BSN)",
+  "Nursing Student (ADN)",
+  "Physician Assistant Student",
+  "Pharmacy Student",
+  "Dental Student",
+  "Veterinary Student",
+  "Physical Therapy Student",
+  "Occupational Therapy Student",
+  "Speech Pathology Student",
+  "Respiratory Therapy Student",
+  "Radiology Technology Student",
+  "Medical Laboratory Science Student",
+  "Public Health Student",
+  "Biomedical Sciences Student",
+  "Pre-Med",
+  "Pre-Nursing",
+  "Pre-Pharmacy",
+  "Pre-Dental",
+  "Pre-Veterinary",
+  "Biology Student",
+  "Biochemistry Student",
+  "Neuroscience Student",
+  "Health Sciences Student",
+  "Other",
+]
 
 export default function RegisterPage() {
   const [formData, setFormData] = useState({
@@ -20,7 +105,9 @@ export default function RegisterPage() {
     email: "",
     password: "",
     confirmPassword: "",
+    userType: "" as "" | "professional" | "student",
     profession: "",
+    professionOther: "",
     age: "",
   })
   const [isLoading, setIsLoading] = useState(false)
@@ -32,8 +119,28 @@ export default function RegisterPage() {
     setFormData((prev) => ({ ...prev, [name]: value }))
   }
 
+  function handleUserTypeChange(value: string) {
+    setFormData((prev) => ({
+      ...prev,
+      userType: value as "professional" | "student",
+      profession: "",
+      professionOther: "",
+    }))
+  }
+
   function handleProfessionChange(value: string) {
-    setFormData((prev) => ({ ...prev, profession: value }))
+    setFormData((prev) => ({
+      ...prev,
+      profession: value,
+      professionOther: value === "Other" ? prev.professionOther : "",
+    }))
+  }
+
+  function getProfessionValue(): string {
+    if (formData.profession === "Other") {
+      return formData.professionOther.trim() || "Other"
+    }
+    return formData.profession
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -48,30 +155,55 @@ export default function RegisterPage() {
       return
     }
 
+    if (!formData.userType) {
+      toast({
+        title: "Select your role",
+        description: "Please select whether you are a Professional or Student.",
+        variant: "destructive",
+      })
+      return
+    }
+
+    const professionValue = getProfessionValue()
+    if (!professionValue) {
+      toast({
+        title: "Select your field",
+        description: "Please select your profession or field of study.",
+        variant: "destructive",
+      })
+      return
+    }
+
     setIsLoading(true)
 
     try {
+      const payload = {
+        name: formData.name,
+        email: formData.email,
+        password: formData.password,
+        user_type: formData.userType,
+        profession: formData.profession === "Other" ? "other" : professionValue,
+        profession_other: formData.profession === "Other" ? formData.professionOther.trim() || undefined : undefined,
+        age: formData.age ? parseInt(formData.age, 10) : undefined,
+      }
+
       const response = await fetch("/api/auth/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(formData),
+        body: JSON.stringify(payload),
       })
 
+      const data = await response.json().catch(() => ({}))
       if (!response.ok) {
-        throw new Error("Registration failed")
+        const msg = data.message || data.detail || "Registration failed"
+        throw new Error(msg)
       }
 
-      const result = await response.json()
-      
-      // Store authentication tokens
-      if (result.token) {
-        localStorage.setItem("token", result.token)
+      if (data.token && data.user) {
+        saveAuth(data.token, data.user)
       }
-      if (result.session_token) {
-        localStorage.setItem("session_token", result.session_token)
-      }
-      if (result.user) {
-        localStorage.setItem("user", JSON.stringify(result.user))
+      if (data.session_token) {
+        localStorage.setItem("session_token", data.session_token)
       }
 
       toast({
@@ -83,13 +215,16 @@ export default function RegisterPage() {
     } catch (error) {
       toast({
         title: "Registration failed",
-        description: "There was an error creating your account. Please try again.",
+        description: error instanceof Error ? error.message : "There was an error creating your account. Please try again.",
         variant: "destructive",
       })
     } finally {
       setIsLoading(false)
     }
   }
+
+  const options = formData.userType === "student" ? STUDENT_FIELD_OPTIONS : PROFESSION_OPTIONS
+  const showOtherInput = formData.profession === "Other"
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-black via-[#0A1128] to-[#4C1D95] flex items-center justify-center p-4 relative overflow-hidden">
@@ -177,39 +312,69 @@ export default function RegisterPage() {
               />
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <Label>I am a...</Label>
+              <Select value={formData.userType} onValueChange={handleUserTypeChange} required>
+                <SelectTrigger className="bg-black/50 border-purple-700/40 text-white">
+                  <SelectValue placeholder="Select your role" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="professional">Professional</SelectItem>
+                  <SelectItem value="student">Student</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            {formData.userType && (
               <div className="space-y-2">
-                <Label htmlFor="profession">Profession</Label>
-                <Select onValueChange={handleProfessionChange}>
+                <Label>
+                  {formData.userType === "professional" ? "Profession" : "Field of study"}
+                </Label>
+                <Select value={formData.profession} onValueChange={handleProfessionChange}>
                   <SelectTrigger className="bg-black/50 border-purple-700/40 text-white">
-                    <SelectValue placeholder="Select profession" />
+                    <SelectValue
+                      placeholder={
+                        formData.userType === "professional"
+                          ? "Select your profession"
+                          : "Select your field"
+                      }
+                    />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="doctor">Doctor</SelectItem>
-                    <SelectItem value="surgeon">Surgeon</SelectItem>
-                    <SelectItem value="nurse">Nurse</SelectItem>
-                    <SelectItem value="student">Medical Student</SelectItem>
-                    <SelectItem value="physiotherapist">Physiotherapist</SelectItem>
-                    <SelectItem value="other">Other</SelectItem>
+                    {options.map((opt) => (
+                      <SelectItem key={opt} value={opt}>
+                        {opt}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="age">Age</Label>
+                {showOtherInput && (
                   <Input
-                    id="age"
-                    name="age"
-                    type="number"
-                    placeholder="30"
-                    min="18"
-                    max="100"
-                    value={formData.age}
-                    onChange={handleChange}
-                    className="bg-black/50 border-purple-700/40 text-white"
-                    required
+                    placeholder="Enter your profession or field"
+                    value={formData.professionOther}
+                    onChange={(e) =>
+                      setFormData((prev) => ({ ...prev, professionOther: e.target.value }))
+                    }
+                    className="mt-2 bg-black/50 border-purple-700/40 text-white"
                   />
+                )}
               </div>
+            )}
+
+            <div className="space-y-2">
+              <Label htmlFor="age">Age</Label>
+              <Input
+                id="age"
+                name="age"
+                type="number"
+                placeholder="30"
+                min="18"
+                max="100"
+                value={formData.age}
+                onChange={handleChange}
+                className="bg-black/50 border-purple-700/40 text-white"
+              />
+              <p className="text-xs text-gray-500">Optional</p>
             </div>
 
             <div className="space-y-2">
@@ -222,7 +387,9 @@ export default function RegisterPage() {
                 onChange={handleChange}
                 className="bg-black/50 border-purple-700/40 text-white"
                 required
+                minLength={8}
               />
+              <p className="text-xs text-gray-500">Minimum 8 characters</p>
             </div>
 
             <div className="space-y-2">

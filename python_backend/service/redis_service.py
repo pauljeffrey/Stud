@@ -4,9 +4,13 @@ Handles user chat sessions, game sessions, and other temporary data
 """
 from typing import Optional, Dict, Any, List
 import json
+import logging
+import os
 import redis.asyncio as redis
 from datetime import datetime, timedelta
-from config import config
+from configs.config import config
+
+logger = logging.getLogger(__name__)
 
 
 class RedisService:
@@ -21,17 +25,21 @@ class RedisService:
         self._initialized = False
     
     async def _ensure_connected(self):
-        """Ensure Redis connection is established"""
+        """Ensure Redis connection is established (lazy, with sized pool)."""
         if not self._initialized and config.REDIS_URL:
             try:
+                max_conns = int(os.getenv("REDIS_MAX_CONNECTIONS", "100") or 100)
                 self.client = await redis.from_url(
                     config.REDIS_URL,
                     decode_responses=True,
-                    encoding="utf-8"
+                    encoding="utf-8",
+                    max_connections=max_conns,
+                    health_check_interval=30,
+                    socket_keepalive=True,
                 )
                 self._initialized = True
             except Exception as e:
-                print(f"Redis connection failed: {e}")
+                logger.warning("Redis connection failed: %s", e)
                 self.client = None
     
     async def close(self):
@@ -69,7 +77,7 @@ class RedisService:
             )
             return True
         except Exception as e:
-            print(f"Redis set_chat_session error: {e}")
+            logger.warning("Redis set_chat_session error: %s", e)
             return False
     
     async def get_chat_session(
@@ -96,7 +104,7 @@ class RedisService:
                 return json.loads(data)
             return None
         except Exception as e:
-            print(f"Redis get_chat_session error: {e}")
+            logger.warning("Redis get_chat_session error: %s", e)
             return None
     
     async def append_chat_message(
@@ -141,7 +149,7 @@ class RedisService:
             await self.client.delete(key)
             return True
         except Exception as e:
-            print(f"Redis delete_chat_session error: {e}")
+            logger.warning("Redis delete_chat_session error: %s", e)
             return False
     
     # ============================================
@@ -168,7 +176,7 @@ class RedisService:
             )
             return True
         except Exception as e:
-            print(f"Redis cache_game_state error: {e}")
+            logger.warning("Redis cache_game_state error: %s", e)
             return False
     
     async def get_game_state(self, game_id: str) -> Optional[Dict[str, Any]]:
@@ -184,7 +192,7 @@ class RedisService:
                 return json.loads(data)
             return None
         except Exception as e:
-            print(f"Redis get_game_state error: {e}")
+            logger.warning("Redis get_game_state error: %s", e)
             return None
     
     async def update_game_state(
@@ -209,7 +217,7 @@ class RedisService:
             await self.client.delete(key)
             return True
         except Exception as e:
-            print(f"Redis delete_game_state error: {e}")
+            logger.warning("Redis delete_game_state error: %s", e)
             return False
     
     async def get_user_active_games(self, user_id: str) -> List[str]:
@@ -227,8 +235,131 @@ class RedisService:
                     keys.append(key.replace("game_state:", ""))
             return keys
         except Exception as e:
-            print(f"Redis get_user_active_games error: {e}")
+            logger.warning("Redis get_user_active_games error: %s", e)
             return []
+    
+    # ============================================
+    # COMPREHENSIVE STATE MANAGEMENT
+    # ============================================
+    
+    async def save_game_session_state(
+        self,
+        user_id: str,
+        session_id: str,
+        game_world: Dict[str, Any],
+        game_state: Dict[str, Any],
+        case_state: Dict[str, Any],
+        npc_states: List[Dict[str, Any]],
+        previous_cases: Optional[Dict[str, Any]] = None,
+        ttl: int = 3600
+    ) -> bool:
+        """Save complete game session state to Redis"""
+        await self._ensure_connected()
+        if not self.client:
+            return False
+        
+        try:
+            # Save all components with user_id and session_id keys
+            base_key = f"game_session:{user_id}:{session_id}"
+            
+            # Save game world
+            await self.client.setex(
+                f"{base_key}:game_world",
+                ttl,
+                json.dumps(game_world, default=str)
+            )
+            
+            # Save game state
+            await self.client.setex(
+                f"{base_key}:game_state",
+                ttl,
+                json.dumps(game_state, default=str)
+            )
+            
+            # Save case state
+            await self.client.setex(
+                f"{base_key}:case_state",
+                ttl,
+                json.dumps(case_state, default=str)
+            )
+            
+            # Save NPC states
+            await self.client.setex(
+                f"{base_key}:npc_states",
+                ttl,
+                json.dumps(npc_states, default=str)
+            )
+            
+            # Save previous cases if provided
+            if previous_cases:
+                await self.client.setex(
+                    f"{base_key}:previous_cases",
+                    ttl,
+                    json.dumps(previous_cases, default=str)
+                )
+            
+            return True
+        except Exception as e:
+            logger.warning("Redis save_game_session_state error: %s", e)
+            return False
+    
+    async def get_game_session_state(
+        self,
+        user_id: str,
+        session_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Get complete game session state from Redis"""
+        await self._ensure_connected()
+        if not self.client:
+            return None
+        
+        try:
+            base_key = f"game_session:{user_id}:{session_id}"
+            
+            game_world_data = await self.client.get(f"{base_key}:game_world")
+            game_state_data = await self.client.get(f"{base_key}:game_state")
+            case_state_data = await self.client.get(f"{base_key}:case_state")
+            npc_states_data = await self.client.get(f"{base_key}:npc_states")
+            previous_cases_data = await self.client.get(f"{base_key}:previous_cases")
+            
+            if not all([game_world_data, game_state_data, case_state_data, npc_states_data]):
+                return None
+            
+            return {
+                "game_world": json.loads(game_world_data),
+                "game_state": json.loads(game_state_data),
+                "case_state": json.loads(case_state_data),
+                "npc_states": json.loads(npc_states_data),
+                "previous_cases": json.loads(previous_cases_data) if previous_cases_data else None
+            }
+        except Exception as e:
+            logger.warning("Redis get_game_session_state error: %s", e)
+            return None
+    
+    async def delete_game_session_state(
+        self,
+        user_id: str,
+        session_id: str
+    ) -> bool:
+        """Delete game session state from Redis"""
+        await self._ensure_connected()
+        if not self.client:
+            return False
+        
+        try:
+            base_key = f"game_session:{user_id}:{session_id}"
+            keys = [
+                f"{base_key}:game_world",
+                f"{base_key}:game_state",
+                f"{base_key}:case_state",
+                f"{base_key}:npc_states",
+                f"{base_key}:previous_cases"
+            ]
+            await self.client.delete(*keys)
+            return True
+        except Exception as e:
+            logger.warning("Redis delete_game_session_state error: %s", e)
+            return False
     
     # ============================================
     # QUIZ SESSIONS
@@ -254,7 +385,7 @@ class RedisService:
             )
             return True
         except Exception as e:
-            print(f"Redis cache_quiz_session error: {e}")
+            logger.warning("Redis cache_quiz_session error: %s", e)
             return False
     
     async def get_quiz_session(self, quiz_id: str) -> Optional[Dict[str, Any]]:
@@ -270,7 +401,7 @@ class RedisService:
                 return json.loads(data)
             return None
         except Exception as e:
-            print(f"Redis get_quiz_session error: {e}")
+            logger.warning("Redis get_quiz_session error: %s", e)
             return None
     
     async def cache_quiz_progress(
@@ -302,7 +433,7 @@ class RedisService:
             )
             return True
         except Exception as e:
-            print(f"Redis cache_quiz_progress error: {e}")
+            logger.warning("Redis cache_quiz_progress error: %s", e)
             return False
     
     async def get_quiz_progress(
@@ -322,7 +453,7 @@ class RedisService:
                 return json.loads(data)
             return None
         except Exception as e:
-            print(f"Redis get_quiz_progress error: {e}")
+            logger.warning("Redis get_quiz_progress error: %s", e)
             return None
     
     # ============================================
@@ -357,7 +488,7 @@ class RedisService:
             )
             return True
         except Exception as e:
-            print(f"Redis cache_document_processing error: {e}")
+            logger.warning("Redis cache_document_processing error: %s", e)
             return False
     
     async def get_document_processing(self, document_id: str) -> Optional[Dict[str, Any]]:
@@ -373,7 +504,7 @@ class RedisService:
                 return json.loads(data)
             return None
         except Exception as e:
-            print(f"Redis get_document_processing error: {e}")
+            logger.warning("Redis get_document_processing error: %s", e)
             return None
     
     # ============================================
@@ -400,7 +531,7 @@ class RedisService:
             )
             return True
         except Exception as e:
-            print(f"Redis cache_user_session error: {e}")
+            logger.warning("Redis cache_user_session error: %s", e)
             return False
     
     async def get_user_session(self, user_id: str) -> Optional[Dict[str, Any]]:
@@ -416,7 +547,7 @@ class RedisService:
                 return json.loads(data)
             return None
         except Exception as e:
-            print(f"Redis get_user_session error: {e}")
+            logger.warning("Redis get_user_session error: %s", e)
             return None
     
     # ============================================
@@ -451,7 +582,7 @@ class RedisService:
             await self.client.incr(rate_key)
             return True, limit - current_count - 1
         except Exception as e:
-            print(f"Redis check_rate_limit error: {e}")
+            logger.warning("Redis check_rate_limit error: %s", e)
             return True, limit
     
     # ============================================
@@ -479,7 +610,7 @@ class RedisService:
             await self.client.delete(key)
             return True
         except Exception as e:
-            print(f"Redis delete error: {e}")
+            logger.warning("Redis delete error: %s", e)
             return False
     
     async def set_with_ttl(
@@ -501,7 +632,7 @@ class RedisService:
             )
             return True
         except Exception as e:
-            print(f"Redis set_with_ttl error: {e}")
+            logger.warning("Redis set_with_ttl error: %s", e)
             return False
     
     async def get(self, key: str) -> Optional[Any]:
@@ -519,7 +650,7 @@ class RedisService:
                     return data
             return None
         except Exception as e:
-            print(f"Redis get error: {e}")
+            logger.warning("Redis get error: %s", e)
             return None
 
 

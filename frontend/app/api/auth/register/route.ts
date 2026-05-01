@@ -1,52 +1,70 @@
 import { NextResponse } from "next/server"
+import { PYTHON_BACKEND_URL } from "@/app/lib/proxy"
 
-const pythonBackendUrl = process.env.PYTHON_BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
+const SESSION_COOKIE_MAX_AGE = 7 * 24 * 60 * 60 // 7 days
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
 export async function POST(request: Request) {
   try {
     const userData = await request.json()
 
-    // Validate required fields
-    const requiredFields = ["name", "email", "password"]
-    for (const field of requiredFields) {
+    for (const field of ["name", "email", "password"] as const) {
       if (!userData[field]) {
         return NextResponse.json({ success: false, message: `${field} is required` }, { status: 400 })
       }
     }
-
-    // Call Python backend registration endpoint
-    const response = await fetch(`${pythonBackendUrl}/api/auth/register`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        email: userData.email,
-        password: userData.password,
-        name: userData.name,
-        profession: userData.profession || null,
-        age: userData.age ? parseInt(userData.age) : null,
-      }),
-    })
-
-    const data = await response.json()
-
-    if (!response.ok) {
+    if (!userData.user_type || !["professional", "student"].includes(userData.user_type)) {
       return NextResponse.json(
-        { success: false, message: data.detail || "Registration failed" },
-        { status: response.status }
+        { success: false, message: "Please select whether you are a Professional or Student" },
+        { status: 400 }
+      )
+    }
+    const professionValue = userData.profession === "other" ? userData.profession_other : userData.profession
+    if (!professionValue || (typeof professionValue === "string" && !professionValue.trim())) {
+      return NextResponse.json(
+        { success: false, message: "Please select or enter your profession/field" },
+        { status: 400 }
+      )
+    }
+    if (!EMAIL_REGEX.test(userData.email)) {
+      return NextResponse.json({ success: false, message: "Invalid email format" }, { status: 400 })
+    }
+    if (userData.password.length < 8) {
+      return NextResponse.json(
+        { success: false, message: "Password must be at least 8 characters long" },
+        { status: 400 }
       )
     }
 
-    // Store token in response headers for client to read
-    const responseHeaders = new Headers()
-    if (data.token) {
-      responseHeaders.set("X-Auth-Token", data.token)
-    }
-    if (data.session_token) {
-      responseHeaders.set("X-Session-Token", data.session_token)
+    const backendPayload = {
+      email: userData.email,
+      password: userData.password,
+      name: userData.name,
+      user_type: userData.user_type,
+      profession: userData.profession,
+      profession_other: userData.profession_other || undefined,
+      age: userData.age ? parseInt(userData.age, 10) : undefined,
     }
 
+    const response = await fetch(`${PYTHON_BACKEND_URL}/api/auth/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(backendPayload),
+    })
+    const data = await response.json().catch(() => ({}))
+
+    if (!response.ok) {
+      const message = typeof data.detail === "string" ? data.detail : data.message || "Registration failed"
+      return NextResponse.json({ success: false, message }, { status: response.status })
+    }
+
+    const headers = new Headers()
+    if (data.session_token) {
+      headers.set(
+        "Set-Cookie",
+        `session_token=${data.session_token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${SESSION_COOKIE_MAX_AGE}`
+      )
+    }
     return NextResponse.json(
       {
         success: true,
@@ -55,7 +73,7 @@ export async function POST(request: Request) {
         token: data.token,
         session_token: data.session_token,
       },
-      { headers: responseHeaders }
+      { headers }
     )
   } catch (error) {
     console.error("Registration error:", error)

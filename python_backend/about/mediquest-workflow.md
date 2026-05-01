@@ -259,17 +259,13 @@ POST /api/game/submit-answer
 POST /api/game/dice-effect
 {
   "game_state": {...},
-  "dice_result": 3
+  "dice_result": 5
 }
 ```
 
 **Flow**:
-1. Validate dice result (1-6)
-2. Get Dice Agent
-3. Call `generate_dice_effect(game_state, dice_result)`:
-   - Dice 1-2: Complications (worsening condition)
-   - Dice 3-4: Moderate changes (new symptoms)
-   - Dice 5-6: Favorable (improvement)
+1. Validate dice result (0-10)
+2. Call `GameMasterAgent.update_clinical_case(..., dice_result)` to nudge escalation level (low rolls de-escalate, high rolls escalate)
 4. Append effect to case scenario description
 5. Stream response
 6. Return updated game state

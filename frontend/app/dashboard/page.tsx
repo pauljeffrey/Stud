@@ -113,17 +113,14 @@ export default function DashboardPage() {
   const { toast } = useToast()
 
   useEffect(() => {
-    loadUserData()
-    // Simulate real-time updates every 30 seconds
-    const interval = setInterval(() => {
-      loadUserData()
-    }, 30000)
-    return () => clearInterval(interval)
+    loadUserData(true)
   }, [])
 
-  const loadUserData = async () => {
+  const loadUserData = async (isInitialLoad = true) => {
     try {
-      setIsLoading(true)
+      if (isInitialLoad) {
+        setIsLoading(true)
+      }
       const token = localStorage.getItem("token")
       if (!token) {
         // Redirect to login if no token
@@ -141,12 +138,35 @@ export default function DashboardPage() {
       if (statsResponse.ok) {
         const statsData = await statsResponse.json()
         if (statsData.success && statsData.stats) {
+          const stats = statsData.stats
           setUserStats({
-            ...statsData.stats,
-            achievements: statsData.achievements || [],
+            totalQuests: stats.totalQuests ?? 0,
+            completedQuests: stats.completedQuests ?? 0,
+            totalQuizzes: stats.totalQuizzes ?? 0,
+            averageScore: stats.averageScore ?? 0,
+            timeSpent: stats.timeSpent ?? 0,
+            currentLevel: stats.currentLevel ?? 1,
+            experiencePoints: stats.experiencePoints ?? 0,
+            totalXP: stats.totalXP ?? stats.experiencePoints ?? 0,
+            xpToNextLevel: stats.xpToNextLevel ?? 1000,
+            achievements: statsData.achievements ?? [],
           })
+        } else if (statsData.stats) {
+          setUserStats({ ...statsData.stats, achievements: statsData.achievements ?? [] })
         } else {
-          setUserStats(statsData)
+          // Fallback when response ok but structure unexpected
+          setUserStats({
+            totalQuests: 0,
+            completedQuests: 0,
+            totalQuizzes: 0,
+            averageScore: 0,
+            timeSpent: 0,
+            currentLevel: 1,
+            experiencePoints: 0,
+            totalXP: 0,
+            xpToNextLevel: 1000,
+            achievements: [],
+          })
         }
       } else {
         // Fallback to mock data
@@ -242,10 +262,25 @@ export default function DashboardPage() {
         }
       }
 
-      // Load API settings from localStorage
-      const savedSettings = localStorage.getItem("apiSettings")
-      if (savedSettings) {
-        setApiSettings(JSON.parse(savedSettings))
+      // Load API settings from database (or fallback to localStorage)
+      const settingsResponse = await fetch("/api/user/settings", {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (settingsResponse.ok) {
+        const settingsData = await settingsResponse.json()
+        if (settingsData.success && settingsData.settings) {
+          const s = settingsData.settings
+          setApiSettings({
+            provider: s.provider || "gemini",
+            modelName: s.modelName || "",
+            apiKey: s.apiKey || "",
+          })
+        }
+      } else {
+        const savedSettings = localStorage.getItem("apiSettings")
+        if (savedSettings) {
+          setApiSettings(JSON.parse(savedSettings))
+        }
       }
     } catch (error) {
       console.error("Failed to load user data:", error)
@@ -269,11 +304,36 @@ export default function DashboardPage() {
 
   const saveApiSettings = async () => {
     try {
-      localStorage.setItem("apiSettings", JSON.stringify(apiSettings))
-      toast({
-        title: "Settings Saved",
-        description: "Your API settings have been saved successfully.",
-      })
+      const token = localStorage.getItem("token")
+      if (token) {
+        const response = await fetch("/api/user/settings", {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            provider: apiSettings.provider,
+            modelName: apiSettings.modelName,
+            apiKey: apiSettings.apiKey,
+          }),
+        })
+        if (response.ok) {
+          localStorage.setItem("apiSettings", JSON.stringify(apiSettings))
+          toast({
+            title: "Settings Saved",
+            description: "Your API settings have been saved to your account.",
+          })
+        } else {
+          throw new Error("Failed to save")
+        }
+      } else {
+        localStorage.setItem("apiSettings", JSON.stringify(apiSettings))
+        toast({
+          title: "Settings Saved",
+          description: "Saved locally (log in to sync across devices).",
+        })
+      }
     } catch (error) {
       toast({
         title: "Error",
@@ -332,7 +392,7 @@ export default function DashboardPage() {
     }
   }
 
-  if (isLoading || !userStats) {
+  if (isLoading && !userStats) {
     return (
       <div className="min-h-screen bg-gradient-to-b from-purple-900 via-purple-800 to-purple-900 p-4">
         <div className="max-w-7xl mx-auto space-y-6">
@@ -352,12 +412,13 @@ export default function DashboardPage() {
     )
   }
 
-  const levelProgress = (userStats.totalXP / (userStats.totalXP + userStats.xpToNextLevel)) * 100
+  const totalForLevel = userStats.totalXP + userStats.xpToNextLevel
+  const levelProgress = totalForLevel > 0 ? (userStats.totalXP / totalForLevel) * 100 : 0
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-black via-[#0A1128] to-[#4C1D95] p-4 md:p-6 lg:p-8 relative overflow-hidden">
+    <div className="min-h-screen bg-gradient-to-b from-black via-[#0A1128] to-[#4C1D95] p-4 md:p-6 lg:p-8 relative overflow-x-hidden">
       {/* Animated Background Elements */}
-      <div className="fixed inset-0 overflow-hidden pointer-events-none">
+      <div className="fixed inset-0 overflow-hidden pointer-events-none -z-10">
         <motion.div
           className="absolute top-1/4 left-1/4 w-96 h-96 bg-purple-900/30 rounded-full blur-3xl"
           animate={{
@@ -390,15 +451,8 @@ export default function DashboardPage() {
 
       <div className="max-w-7xl mx-auto relative z-10">
         {/* Header with Animation */}
-        <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4 animate-in fade-in slide-in-from-top-4 duration-700">
+        <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
           <div>
-            <motion.h1
-              initial={{ opacity: 0, y: -20 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="text-4xl md:text-5xl font-bold text-white mb-2 bg-gradient-to-r from-purple-400 via-purple-300 to-blue-400 bg-clip-text text-transparent"
-            >
-              Dashboard
-            </motion.h1>
             <motion.p
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
@@ -549,7 +603,7 @@ export default function DashboardPage() {
                       {userStats.completedQuests}/{userStats.totalQuests}
                     </p>
                     <Progress
-                      value={(userStats.completedQuests / userStats.totalQuests) * 100}
+                      value={userStats.totalQuests > 0 ? (userStats.completedQuests / userStats.totalQuests) * 100 : 0}
                       className="h-2 bg-purple-900/50"
                     />
                   </CardContent>
@@ -620,14 +674,14 @@ export default function DashboardPage() {
                     </div>
                     <p className="text-sm text-gray-400 mb-1">Achievements</p>
                     <p className="text-3xl font-bold">
-                      {userStats.achievements.filter((a) => a.earned).length}/{userStats.achievements.length}
+                      {userStats.achievements?.filter((a) => a.earned).length ?? 0}/{userStats.achievements?.length ?? 0}
                     </p>
                   </CardContent>
                 </Card>
               </motion.div>
             </div>
 
-            {/* Recent Activity with Animations */}
+            {/* Recent Activity - real data from API */}
             <Card className="bg-white/10 backdrop-blur-sm border-purple-400 text-white">
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
@@ -638,23 +692,36 @@ export default function DashboardPage() {
               </CardHeader>
               <CardContent>
                 <div className="space-y-3">
-                  {[
-                    { icon: Trophy, text: "Completed 'Emergency Medicine' quest", time: "2 hours ago", color: "yellow" },
-                    { icon: Brain, text: "Scored 92% on Cardiology Quiz", time: "1 day ago", color: "blue" },
-                    { icon: BookOpen, text: "Studied 'Pharmacology Basics' for 45 minutes", time: "2 days ago", color: "green" },
-                  ].map((activity, index) => (
-                    <div
-                      key={index}
-                      className="flex items-center gap-4 p-4 bg-purple-800/50 backdrop-blur-sm rounded-lg border border-purple-700 hover:border-purple-500 transition-all duration-300 transform hover:scale-[1.02] animate-in fade-in slide-in-from-left"
-                      style={{ animationDelay: `${index * 100}ms` }}
-                    >
-                      <activity.icon className={`h-5 w-5 text-${activity.color}-400 flex-shrink-0`} />
-                      <div className="flex-1 min-w-0">
-                        <p className="font-semibold truncate">{activity.text}</p>
-                        <p className="text-sm text-purple-200">{activity.time}</p>
-                      </div>
-                    </div>
-                  ))}
+                  {recentActivities.length > 0 ? (
+                    recentActivities.map((activity) => {
+                      const Icon = activity.type === "game" ? Trophy : Brain
+                      const timeStr = activity.timestamp
+                        ? new Date(activity.timestamp).toLocaleDateString(undefined, {
+                            month: "short",
+                            day: "numeric",
+                            hour: "numeric",
+                            minute: "2-digit",
+                          })
+                        : "Recently"
+                      return (
+                        <div
+                          key={activity.id}
+                          className="flex items-center gap-4 p-4 bg-purple-800/50 backdrop-blur-sm rounded-lg border border-purple-700 hover:border-purple-500 transition-all duration-300 transform hover:scale-[1.02]"
+                        >
+                          <Icon className="h-5 w-5 text-purple-400 flex-shrink-0" />
+                          <div className="flex-1 min-w-0">
+                            <p className="font-semibold truncate">{activity.title}</p>
+                            <p className="text-sm text-purple-200">
+                              {activity.type === "quiz" && activity.score != null ? `Score: ${activity.score}% • ` : ""}
+                              {timeStr}
+                            </p>
+                          </div>
+                        </div>
+                      )
+                    })
+                  ) : (
+                    <p className="text-purple-300 py-6 text-center">No recent activity yet. Start a quest or take a quiz!</p>
+                  )}
                 </div>
               </CardContent>
             </Card>
@@ -671,7 +738,7 @@ export default function DashboardPage() {
               </CardHeader>
               <CardContent>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                  {userStats.achievements.map((achievement, index) => (
+                  {(userStats.achievements ?? []).map((achievement, index) => (
                     <div
                       key={achievement.id}
                       className={`p-5 rounded-lg border-2 transition-all duration-300 transform hover:scale-105 ${

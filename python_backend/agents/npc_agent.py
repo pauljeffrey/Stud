@@ -3,6 +3,7 @@ NPC Agent for Stud
 Non-playable characters that help users identify symptoms and problems
 NPCs take on the character of the illness/condition provided by game master or state controller
 """
+import asyncio
 from typing import Optional, List, Dict, Any
 from pydantic_ai import Agent
 import os
@@ -10,13 +11,18 @@ import json
 import random
 import uuid
 
-from config import config
-from agents.base_agent import BaseAgent
+from configs.config import config
 from agents.agents import get_npc_model
-from models.states import NPCState, CaseState, GameWorldModel
+from models.states import NPCState, CaseState, GameWorldModel, NPCRole
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ModelRequest, UserPromptPart, SystemPromptPart
+from utils import (
+    process_chat_history_for_model_inference,
+    save_chat_history_to_storage
+)
+from typing import Union
 
 
-class NPCAgent(BaseAgent):
+class NPCAgent:
     """
     NPC Agent responsible for creating and managing non-playable characters
     NPCs help users by providing clues, symptoms, and guidance based on their condition
@@ -31,14 +37,11 @@ class NPCAgent(BaseAgent):
             api_key: API key for the model
             provider: "google" or "openai"
         """
-        super().__init__(model_name, api_key, provider)
         
         # Initialize agent using the pattern from agents.py
         model = get_npc_model(model_name, api_key)
-        self.agent = Agent(
-            model,
-            system_prompt="""
-            You are an NPC in Stud. You will be given a character name and role.
+        self.npc_system_prompt = """
+        You are an NPC in Stud. You will be given a character name and role.
             Respond authentically as that character would, considering:
             1. Their professional role and expertise level
             2. Their current emotional state and situation
@@ -46,74 +49,47 @@ class NPCAgent(BaseAgent):
             4. Appropriate bedside manner and communication style
             
             Stay in character and provide realistic responses that advance the medical scenario.
-            """,
+            """
+            
+        self.npc_generator_system_prompt = """
+        You are an NPC generator for Stud, an engaging and fun medical role-playing game. You generate all relevant NPCs for a clinical case
+        based on the npc roles,case description, diagnosis, investigations, and game world configuration.
+        
+        Give each NPC appropriate personality, tone, and characteristics based on:
+        - The clinical condition
+        - The game world context
+        - Their professional role
+        - The scenario's emotional context
+        - The NPC roles provided
+        
+        Return a list of NPCState objects.
+        """
+        
+        self.agent = Agent(
+            model,
+            system_prompt=self.npc_system_prompt,
             output_type=NPCState
         )
         
         # Agent for generating all NPCs at once
         self.npc_generator_agent = Agent(
             model,
-            system_prompt="""
-            You are an NPC generator for Stud. Generate all relevant NPCs for a clinical case
-            based on the case description, diagnosis, investigations, and game world configuration.
-            
-            Analyze the clinical case to determine which NPCs are needed:
-            - Patient (always required)
-            - Nurses (based on clinical setting)
-            - Specialists (based on diagnosis/subject)
-            - Family members (if relevant)
-            - Colleagues (if relevant to the scenario)
-            
-            Give each NPC appropriate personality, tone, and characteristics based on:
-            - The clinical condition
-            - The game world context
-            - Their professional role
-            - The scenario's emotional context
-            
-            Return a list of NPCState objects.
-            """,
+            system_prompt=self.npc_generator_system_prompt,
             output_type=List[NPCState]
         )
     
     def _reinitialize_model(self, model_name: Optional[str] = None, api_key: Optional[str] = None):
         """Reinitialize the model"""
-        super()._reinitialize_model(model_name, api_key)
+        
         model = get_npc_model(self.model_name, self.api_key)
         self.agent = Agent(
             model,
-            system_prompt="""
-            You are an NPC in Stud. You will be given a character name and role.
-            Respond authentically as that character would, considering:
-            1. Their professional role and expertise level
-            2. Their current emotional state and situation
-            3. Realistic medical knowledge for their position
-            4. Appropriate bedside manner and communication style
-            
-            Stay in character and provide realistic responses that advance the medical scenario.
-            """,
+            system_prompt=self.npc_system_prompt,
             output_type=NPCState
         )
         self.npc_generator_agent = Agent(
             model,
-            system_prompt="""
-            You are an NPC generator for Stud. Generate all relevant NPCs for a clinical case
-            based on the case description, diagnosis, investigations, and game world configuration.
-            
-            Analyze the clinical case to determine which NPCs are needed:
-            - Patient (always required)
-            - Nurses (based on clinical setting)
-            - Specialists (based on diagnosis/subject)
-            - Family members (if relevant)
-            - Colleagues (if relevant to the scenario)
-            
-            Give each NPC appropriate personality, tone, and characteristics based on:
-            - The clinical condition
-            - The game world context
-            - Their professional role
-            - The scenario's emotional context
-            
-            Return a list of NPCState objects.
-            """,
+            system_prompt=self.npc_generator_system_prompt,
             output_type=List[NPCState]
         )
     
@@ -132,11 +108,12 @@ class NPCAgent(BaseAgent):
         Returns:
             List of NPCState objects
         """
+        
         prompt = f"""
         Generate all relevant NPCs for this clinical case:
         
         Clinical Case:
-        - Description: {case_state.clinical_case_scenario_description[:500]}
+        - Description: {case_state.clinical_case_scenario_description}
         - Diagnosis: {case_state.diagnosis or "Being investigated"}
         - Question: {case_state.question}
         - Investigations: {json.dumps(case_state.investigations or {}, indent=2)}
@@ -145,31 +122,30 @@ class NPCAgent(BaseAgent):
         - Profession: {case_state.profession}
         - Clinical Setting: {case_state.clinical_setting}
         - Subject: {case_state.subject}
-        - Era: {case_state.era}
+        - Era: {case_state.era} 
+        - Natural Conditions: {case_state.natural_conditions}
+        - Nation Type: {case_state.nation_type}
+        - Economic Advantage: {case_state.economic_advantage}
+        - Location: {case_state.location}
         - Hospital: {game_world.hospital_name}
         - Department: {game_world.department}
         - Additional Context: {json.dumps(game_world.additional_context, indent=2)}
         
-        Determine which NPCs are needed:
-        1. Patient (always required)
-        2. Nurses/Staff based on clinical setting
-        3. Specialists based on diagnosis/subject
-        4. Family members if relevant
-        5. Colleagues if scenario involves workplace dynamics
-        
         For each NPC, provide:
         - Appropriate name, age, gender
-        - Role and personality description
+        - Role and personality description (can be a negative one)
         - Tone and mood based on condition
-        - Examination findings relevant to their role
+        - Examination findings if role is Patient
         - Realistic characteristics for their position
         
-        Return a list of NPCState objects with all required fields filled.
+        Minimum NPCs to generate (You can add more if you think it's necessary or FUN): {case_state.npc_roles}
+        if NPC Roles are not provided, return a list of all possible NPCs (given the case and world description) with their appropriate roles.
+        Think carefully about the NPCs you generate and their relationships to the case and world description.
         """
         
         try:
             result = await self.npc_generator_agent.run(prompt)
-            npc_states = result.output if hasattr(result, 'output') else result
+            npc_states = result.output
             
             # Ensure it's a list
             if isinstance(npc_states, list):
@@ -177,15 +153,13 @@ class NPCAgent(BaseAgent):
                 for npc in npc_states:
                     if not hasattr(npc, 'npc_id') or not npc.npc_id:
                         npc.npc_id = str(uuid.uuid4())
-                    if not hasattr(npc, 'user_id') or not npc.user_id:
-                        npc.user_id = case_state.user_id
                     if not hasattr(npc, 'case_id') or not npc.case_id:
                         npc.case_id = case_state.case_id
                 return npc_states
             elif isinstance(npc_states, NPCState):
                 # Single NPC returned, wrap in list
                 npc_states.npc_id = str(uuid.uuid4())
-                npc_states.user_id = case_state.user_id
+                # npc_states.user_id = case_state.user_id
                 npc_states.case_id = case_state.case_id
                 return [npc_states]
             else:
@@ -194,16 +168,13 @@ class NPCAgent(BaseAgent):
         except Exception as e:
             # Fallback to creating NPCs manually if agent fails
             print(f"NPC generation agent failed: {e}, using fallback method")
-            npcs = [self.create_npc_from_case(case_state, "Patient")]
-            
-            # Add supporting NPCs based on clinical setting
-            if "emergency" in case_state.clinical_setting.lower():
-                npcs.append(self.create_npc_from_case(case_state, "Emergency Nurse"))
-            elif "icu" in case_state.clinical_setting.lower():
-                npcs.append(self.create_npc_from_case(case_state, "ICU Nurse"))
-            
-            return npcs
-    
+            extra_roles = ['Patient', 'Specialist', 'Relative', 'Nurse']
+            # Create extra NPCs in parallel
+            extra_npcs = await asyncio.gather(
+                *[asyncio.to_thread(self.create_npc_from_case, case_state, role) for role in extra_roles]
+            )
+            return list(extra_npcs)
+
     def create_npc_from_case(
         self,
         case_state: CaseState,
@@ -212,22 +183,18 @@ class NPCAgent(BaseAgent):
     ) -> NPCState:
         """
         Create an NPC based on the clinical case
-        
+
         Args:
             case_state: Current case state
-            npc_role: Role of the NPC (Patient, Nurse, Specialist, etc.)
+            npc_role: Role of the NPC (Patient, Nurse, Specialist, Emergency Nurse, etc.)
             npc_name: Optional name for the NPC
-            
+
         Returns:
             NPCState configured for this case
         """
-        # Extract key information from case
         clinical_description = case_state.clinical_case_scenario_description
-        diagnosis = case_state.diagnosis or "Unknown condition"
         investigations = case_state.investigations or {}
-        
-        # Determine personality and tone based on condition
-        if "acute" in clinical_description.lower() or "emergency" in clinical_description.lower():
+        if "acute" in clinical_description.lower() or "severe" in clinical_description.lower() or "emergency" in clinical_description.lower():
             tone = "anxious"
             mood = "distressed"
         elif "chronic" in clinical_description.lower():
@@ -236,40 +203,54 @@ class NPCAgent(BaseAgent):
         else:
             tone = "cooperative"
             mood = "neutral"
-        
-        # Create NPC state
+
+        role_enum = self._role_to_npc_enum(npc_role) if npc_role != "Patient" else NPCRole.PATIENT
+        gender = random.choice(["Male", "Female", "Other"])
+        display_name = npc_name or self._generate_npc_name(npc_role, gender)
+
         npc_state = NPCState(
             npc_id=str(uuid.uuid4()),
-            user_id=case_state.user_id,
             case_id=case_state.case_id,
-            name=npc_name or self._generate_npc_name(npc_role),
-            role=npc_role,
+            name=display_name,
+            role=role_enum,
             age=str(random.randint(25, 75)),
-            gender=random.choice(["Male", "Female", "Other"]),
-            personality_description=f"A {npc_role.lower()} experiencing {diagnosis}. "
+            gender=gender,
+            personality_description=f"A {npc_role.lower()} in this scenario. "
                                 f"Characterized by {tone} communication style.",
-            clinical_case_description=clinical_description,
             examination_findings=investigations.copy() if isinstance(investigations, dict) else {},
-            diagnosis=diagnosis,
             tone=tone,
             mood=mood,
-            profession=case_state.profession,
-            clinical_setting=case_state.clinical_setting,
-            subject=case_state.subject,
-            era=case_state.era,
-            natural_conditions=case_state.natural_conditions,
-            nation_type=case_state.nation_type,
-            economic_advantage=case_state.economic_advantage
+            available=True,
+            clue_level=0
         )
         
+        # npc_state.user_id = case_state.user_id
         return npc_state
+    
+    def _role_to_npc_enum(self, role: str) -> NPCRole:
+        """Convert role string to NPCRole enum"""
+        if role.lower() == "patient":
+            return NPCRole.PATIENT
+        elif role.lower() == "nurse":
+            return NPCRole.NURSE
+        elif role.lower() == "specialist":
+            return NPCRole.SPECIALIST
+        elif role.lower() == "relative":
+            return NPCRole.RELATIVE
+        elif role.lower() == "nurse":
+            return NPCRole.NURSE
+        elif role.lower() == "specialist":
+            return NPCRole.SPECIALIST
+        else:
+            return NPCRole.PATIENT
     
     async def chat_with_npc(
         self,
         npc_state: NPCState,
         user_message: str,
         case_state: CaseState,
-        chat_history: List[Dict[str, str]] = None
+        game_world: GameWorldModel,
+        chat_history: Any = None
     ) -> str:
         """
         Generate NPC response to user message
@@ -286,11 +267,34 @@ class NPCAgent(BaseAgent):
         if chat_history is None:
             chat_history = []
         
-        # Create agent for this specific NPC
-        agent = Agent(
-            get_npc_model(self.model_name, self.api_key),
-            system_prompt=f"""
-            You are {npc_state.name}, a {npc_state.role} in Stud, a medical education role-playing game.
+        if npc_state.role == NPCRole.PATIENT and npc_state.examination_findings:
+            examination_findings = f"""
+            - Examination Findings: {json.dumps(npc_state.examination_findings)}
+            """
+        else:
+            examination_findings = ""
+        
+        if npc_state.role in [NPCRole.PATIENT, NPCRole.NURSE, NPCRole.SPECIALIST]:
+            clue_level_description = f"""
+            - Clue Level: {npc_state.clue_level}/3
+            - Level 0-1: Give subtle hints about symptoms
+            - Level 2: Provide more direct clues
+            - Level 3: Can be more explicit (but still in character)
+            """
+        else:
+            clue_level_description = ""
+        
+        system_prompt = f"""
+            You are {npc_state.name}, a {npc_state.role} and non-playable character in Stud, a medical education role-playing game.
+            
+            World Info:
+            world_description: {game_world.world_description}
+            clinical_setting: {game_world.clinical_setting}
+            era: {game_world.era}
+            natural_conditions: {game_world.natural_conditions}
+            location: {game_world.location}
+            hospital_name: {game_world.hospital_name}
+            department: {game_world.department}
             
             Your Character:
             - Role: {npc_state.role}
@@ -298,81 +302,122 @@ class NPCAgent(BaseAgent):
             - Tone: {npc_state.tone}
             - Mood: {npc_state.mood}
             
-            Your Condition:
-            - Clinical Description: {npc_state.clinical_case_description}
-            - Diagnosis: {npc_state.diagnosis or "Being investigated"}
-            - Examination Findings: {json.dumps(npc_state.examination_findings)}
-            
             Your Purpose:
-            Help the healthcare professional (player) identify symptoms, understand your condition,
-            and reach a diagnosis or management plan. You can:
-            - Describe your symptoms and how you feel
-            - Answer questions about your medical history
-            - Provide clues about your condition (but don't give away the diagnosis directly)
-            - Express concerns or ask questions
+            Help the user (player) understand case condition better.
+            Stay in character! Respond as this person would, given their role, condition and personality.
+            Play the role appropriately.
+            {clue_level_description}
             
-            Stay in character! Respond as this person would, given their condition and personality.
-            Be helpful but realistic - you're experiencing a medical condition, not a medical textbook.
-            
-            Clue Level: {npc_state.clue_level}/3
-            - Level 0-1: Give subtle hints about symptoms
-            - Level 2: Provide more direct clues
-            - Level 3: Can be more explicit (but still in character)
-            """,
-            output_type=str
-        )
-        
-        # Build context
-        context = f"""
         Case Context:
+        - Clinical Case Scenario Description: {case_state.clinical_case_scenario_description}
+        - Diagnosis: {case_state.diagnosis or "Being investigated"}
+        {examination_findings}
         - Question: {case_state.question}
-        - Current Scenario: {case_state.clinical_case_scenario_description[:300]}
-        
-        Chat History:
-        {self._format_chat_history(chat_history[-5:])}  # Last 5 messages
-        
-        User's Current Message: {user_message}
         
         Respond as {npc_state.name}, staying true to your character, condition, and personality.
         Help the healthcare professional understand your condition through natural conversation.
-        """
+        **You must not provide the answer to the question directly no matter what.**
+            """
         
-        # Get AI response
-        result = await agent.run(context)
-        response = result.output
+        # Create agent for this specific NPC
+        agent = Agent(
+            get_npc_model(self.model_name, self.api_key),
+            system_prompt=system_prompt,
+            output_type=str,
+            history_processors=[]
+        )
+        chat_history = process_chat_history_for_model_inference(chat_history)
         
-        # Increment clue level if this seems like a clue-giving response
-        if any(keyword in response.lower() for keyword in ["symptom", "feel", "notice", "experience", "pain"]):
-            npc_state.clue_level = min(3, npc_state.clue_level + 1)
-        
-        return response
-    
-    def _generate_npc_name(self, role: str) -> str:
-        """Generate appropriate name for NPC based on role"""
-        first_names = ["John", "Sarah", "Michael", "Emily", "David", "Jessica", "James", "Amanda"]
-        last_names = ["Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis"]
-        
-        if role.lower() == "patient":
-            return f"{random.choice(first_names)} {random.choice(last_names)}"
-        elif "nurse" in role.lower():
-            return f"Nurse {random.choice(first_names)}"
-        elif "doctor" in role.lower() or "specialist" in role.lower():
-            return f"Dr. {random.choice(last_names)}"
+        try:
+            # Get AI response
+            result = await agent.run(user_message, message_history=chat_history)
+            response = result
+            
+            # Update chat history
+            if chat_history:
+                chat_history.append(ModelRequest(parts=[UserPromptPart(content=user_message)]))
+                chat_history.append(ModelResponse(parts=[TextPart(content=response)]))
+            else:
+                chat_history = [
+                    ModelRequest(parts=[SystemPromptPart(content=system_prompt)]),
+                    ModelRequest(parts=[UserPromptPart(content=user_message)]),
+                    ModelResponse(parts=[TextPart(content=response)])
+                ]
+            
+            # Save chat history to storage (background job)
+            await save_chat_history_to_storage(
+                chat_history=chat_history,
+                user_id=npc_state.user_id,
+                conversation_id=npc_state.case_id,  # Use case_id as session_id
+                chat_type="npc",
+                npc_id=str(npc_state.npc_id),
+                background=True
+            )
+            
+            return response, chat_history
+        except Exception as e:
+            print(f"NPC chat failed: {e}")
+            return "Sorry, I'm having trouble responding. Please try again later.", chat_history
+
+    async def update_npcs_for_case(
+        self,
+        npc_states: List[NPCState],
+        case_state: CaseState,
+        escalation_delta: float,
+        game_world: GameWorldModel,
+        change_description: str = "",
+    ) -> List[NPCState]:
+        """Refresh NPC mood/tone/personality when the case escalates or de-escalates."""
+        if not npc_states or abs(escalation_delta) < 1e-6:
+            return npc_states
+        compact = [
+            {"npc_id": str(n.npc_id), "name": n.name, "role": str(n.role), "gender": n.gender,
+             "mood": n.mood, "tone": n.tone, "personality_description": n.personality_description[:400]}
+            for n in npc_states
+        ]
+        prompt = f"""Clinical case just shifted (escalation_delta {escalation_delta:+.2f}; negative = calmer, positive = more acute).
+Brief change: {change_description[:400]}
+Case excerpt: {case_state.clinical_case_scenario_description[:700]}
+Setting: {game_world.hospital_name or ''} / {game_world.department or ''}
+Return exactly {len(npc_states)} NPCs in the SAME order. Preserve each npc_id, name, role, gender, age, case_id, examination_findings, clue_level, available.
+Only update mood, tone, personality_description to match the new clinical tension.
+NPCs: {json.dumps(compact, default=str)[:12000]}"""
+        try:
+            result = await self.npc_generator_agent.run(prompt)
+            out = result.output
+            if isinstance(out, list) and len(out) == len(npc_states):
+                merged: List[NPCState] = []
+                for old, new in zip(npc_states, out):
+                    merged.append(old.model_copy(update={
+                        "mood": new.mood,
+                        "tone": new.tone,
+                        "personality_description": new.personality_description,
+                    }))
+                return merged
+        except Exception as e:
+            print(f"update_npcs_for_case: {e}")
+        return npc_states
+
+    def _generate_npc_name(self, role: str, gender: str = "Other") -> str:
+        """Generate a plausible name for NPC based on role and gender."""
+        m_first = ["James", "Michael", "David", "William", "John", "Robert", "Daniel", "Matthew"]
+        f_first = ["Sarah", "Emily", "Jessica", "Amanda", "Jennifer", "Elizabeth", "Maria", "Laura"]
+        n_first = ["Alex", "Jordan", "Taylor", "Casey", "Riley", "Morgan"]
+        last = ["Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis", "Martinez", "Wilson"]
+        g = (gender or "Other").strip().lower()
+        if g == "male":
+            first_pool = m_first
+        elif g == "female":
+            first_pool = f_first
         else:
-            return role
-    
-    def _format_chat_history(self, chat_history: List[Dict[str, str]]) -> str:
-        """Format chat history for context"""
-        if not chat_history:
-            return "No previous conversation."
-        
-        formatted = []
-        for msg in chat_history:
-            role = msg.get("role", "user")
-            content = msg.get("content", "")
-            formatted.append(f"{role.capitalize()}: {content}")
-        
-        return "\n".join(formatted)
+            first_pool = m_first + f_first + n_first
+        if role.lower() == "patient":
+            return f"{random.choice(first_pool)} {random.choice(last)}"
+        if "nurse" in role.lower():
+            return f"Nurse {random.choice(first_pool)}"
+        if "doctor" in role.lower() or "specialist" in role.lower():
+            return f"Dr. {random.choice(last)}"
+        return f"{random.choice(first_pool)} {random.choice(last)}"
 
 
 # Global instance

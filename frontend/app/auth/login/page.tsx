@@ -3,7 +3,7 @@
 import type React from "react"
 
 import { useState } from "react"
-import { useRouter } from "next/navigation"
+import { useRouter, useSearchParams } from "next/navigation"
 import Link from "next/link"
 import { Button } from "@/app/components/ui/button"
 import { Input } from "@/app/components/ui/input"
@@ -12,12 +12,14 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { useToast } from "@/app/components/ui/use-toast"
 import { Loader2 } from "lucide-react"
 import { motion } from "framer-motion"
+import { saveAuth } from "@/app/lib/auth"
 
 export default function LoginPage() {
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const [isLoading, setIsLoading] = useState(false)
   const router = useRouter()
+  const searchParams = useSearchParams()
   const { toast } = useToast()
 
   async function handleSubmit(e: React.FormEvent) {
@@ -31,33 +33,31 @@ export default function LoginPage() {
         body: JSON.stringify({ email, password }),
       })
 
+      const result = await response.json().catch(() => ({}))
+
       if (!response.ok) {
-        throw new Error("Login failed")
+        const msg = result.message || result.detail || "Invalid email or password"
+        throw new Error(typeof msg === "string" ? msg : "Invalid email or password")
       }
 
-      const result = await response.json()
-      
-      // Store authentication tokens
-      if (result.token) {
-        localStorage.setItem("token", result.token)
+      if (result.token && result.user) {
+        saveAuth(result.token, result.user)
       }
       if (result.session_token) {
         localStorage.setItem("session_token", result.session_token)
       }
-      if (result.user) {
-        localStorage.setItem("user", JSON.stringify(result.user))
-      }
 
       toast({
         title: "Login successful",
-        description: "Redirecting to your dashboard...",
+        description: "Redirecting...",
       })
 
-      router.push("/dashboard")
+      const next = searchParams?.get("next")
+      router.push(next && next.startsWith("/") ? next : "/dashboard")
     } catch (error) {
       toast({
         title: "Login failed",
-        description: "Please check your credentials and try again.",
+        description: error instanceof Error ? error.message : "Please check your credentials and try again.",
         variant: "destructive",
       })
     } finally {

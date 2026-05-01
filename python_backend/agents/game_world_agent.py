@@ -4,7 +4,6 @@ Creates comprehensive world models based on user configuration or random initial
 """
 from typing import Optional
 from pydantic_ai import Agent
-from agents.base_agent import BaseAgent
 from agents.agents import get_game_world_model_model
 from models.states import GameWorldModel, GameConfig
 import os
@@ -12,15 +11,14 @@ import json
 import random
 import uuid
 
-from config import config
-from game_config import (
-    PROFESSIONS, ERAS, NATURAL_CONDITIONS, NATIONS, 
-    ECONOMIC_ADVANTAGES, MODES, AREAS, get_subjects_for_profession
+from configs.config import config
+from configs.game_config import (
+    PROFESSIONS, ERAS, NATURAL_CONDITIONS, NATIONS,
+    ECONOMIC_ADVANTAGES, MODES, get_subjects_for_profession,
 )
-from game_config import get_random_attributes
 
 
-class GameWorldAgent(BaseAgent):
+class GameWorldAgent:
     """
     Game World Agent responsible for creating comprehensive game worlds
     based on configuration or random initialization
@@ -35,43 +33,35 @@ class GameWorldAgent(BaseAgent):
             api_key: API key for the model
             provider: "google" or "openai"
         """
-        super().__init__(model_name, api_key, provider)
-        
-        # Initialize agent using the pattern from agents.py
+        self._model_name = model_name
+        self._api_key = api_key
+
         model = get_game_world_model_model(model_name, api_key)
-        self.agent = Agent(
-            model,
-            system_prompt="""
-            You are the Game World Model for Stud. You create comprehensive, immersive game worlds
+        
+        self.agent_system_prompt = """
+            You are the Game World Model for Stud. You create/update comprehensive, immersive game worlds
             for medical education role-playing games based on configuration parameters.
             
-            Generate detailed world descriptions that include:
+            Generate/update detailed world descriptions that include:
             - Rich, immersive world_description that sets the scene
-            - Appropriate hospital_name and department based on the setting
+            - Appropriate hospital_name and department based on the setting/era
             - Additional_context with relevant details about resources, staffing, demographics, etc.
-            
-            Make the world feel alive, realistic, and educational.
-            """,
+            """
+        self.agent = Agent(
+            model,
+            system_prompt=self.agent_system_prompt,
             output_type=GameWorldModel
         )
     
     def _reinitialize_model(self, model_name: Optional[str] = None, api_key: Optional[str] = None):
-        """Reinitialize the model"""
-        super()._reinitialize_model(model_name, api_key)
-        model = get_game_world_model_model(self.model_name, self.api_key)
+        if model_name is not None:
+            self._model_name = model_name
+        if api_key is not None:
+            self._api_key = api_key
+        model = get_game_world_model_model(self._model_name, self._api_key)
         self.agent = Agent(
             model,
-            system_prompt="""
-            You are the Game World Model for Stud. You create comprehensive, immersive game worlds
-            for medical education role-playing games based on configuration parameters.
-            
-            Generate detailed world descriptions that include:
-            - Rich, immersive world_description that sets the scene
-            - Appropriate hospital_name and department based on the setting
-            - Additional_context with relevant details about resources, staffing, demographics, etc.
-            
-            Make the world feel alive, realistic, and educational.
-            """,
+            system_prompt=self.agent_system_prompt,
             output_type=GameWorldModel
         )
     
@@ -85,7 +75,7 @@ class GameWorldAgent(BaseAgent):
         
         if not config.subject:
             subjects = get_subjects_for_profession(config.profession)
-            config.subject = random.choice(subjects) if subjects else "general medicine"
+            config.subject = random.choice(subjects) if subjects else "general"
         
         if not config.era:
             config.era = random.choice(ERAS)
@@ -129,14 +119,15 @@ class GameWorldAgent(BaseAgent):
         
         Create a detailed world model that includes:
         1. A rich, immersive world_description that sets the scene
-        2. Appropriate hospital_name and department based on the setting
+        2. Appropriate hospital_name and department based on the setting. if its an era where a hospital or department is not applicable, use something similar that was used in that era.
         3. Additional_context with relevant details about:
-           - Available medical equipment and resources
+           - Available medical equipment and resources (if applicable)
            - Staffing levels and expertise
            - Patient demographics
            - Environmental factors
            - Cultural and social context
            - Economic constraints or advantages
+           - Nature of the Nation/country or community
            - Historical medical practices (if applicable)
         
         Make the world feel alive, realistic, and educational. The world should provide context
@@ -153,6 +144,14 @@ class GameWorldAgent(BaseAgent):
         if not world_model.world_id:
             world_model.world_id = str(uuid.uuid4())
         
+        return world_model
+
+    async def run(self, prompt: str) -> GameWorldModel:
+        """Run agent with custom prompt (e.g. for world updates)."""
+        result = await self.agent.run(prompt)
+        world_model = result.output
+        if world_model.world_id is None or not world_model.world_id:
+            world_model.world_id = str(uuid.uuid4())
         return world_model
 
 

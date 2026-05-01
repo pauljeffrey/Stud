@@ -1,24 +1,42 @@
-import { type NextRequest, NextResponse } from "next/server"
+import { NextResponse } from "next/server"
+import { PYTHON_BACKEND_URL } from "@/app/lib/proxy"
 
-export async function POST(request: NextRequest) {
+const MAX_FILE_SIZE = 10 * 1024 * 1024 // 10MB
+const MAX_IMAGE_SIZE = 5 * 1024 * 1024 // 5MB
+
+export async function POST(req: Request) {
   try {
-    const formData = await request.formData()
-
-    const pythonBackendUrl = process.env.PYTHON_BACKEND_URL || "http://localhost:8000"
-
-    const response = await fetch(`${pythonBackendUrl}/api/learning/upload`, {
-      method: "POST",
-      body: formData,
-    })
-
-    if (!response.ok) {
-      throw new Error("Failed to upload document")
+    const formData = await req.formData()
+    const file = formData.get("file") as File | null
+    if (!file) {
+      return NextResponse.json({ error: "No file provided" }, { status: 400 })
+    }
+    const maxSize = file.type.startsWith("image/") ? MAX_IMAGE_SIZE : MAX_FILE_SIZE
+    if (file.size > maxSize) {
+      const fileMB = (file.size / 1048576).toFixed(2)
+      const maxMB = (maxSize / 1048576).toFixed(0)
+      return NextResponse.json(
+        { error: `File size (${fileMB}MB) exceeds maximum (${maxMB}MB)` },
+        { status: 400 }
+      )
     }
 
-    const result = await response.json()
-    return NextResponse.json(result)
-  } catch (error) {
+    const headers: Record<string, string> = {}
+    const auth = req.headers.get("authorization")
+    if (auth) headers.Authorization = auth
+
+    const upstream = await fetch(`${PYTHON_BACKEND_URL}/api/learning/upload`, {
+      method: "POST",
+      headers,
+      body: formData,
+    })
+    const data = await upstream.json().catch(() => ({}))
+    return NextResponse.json(data, { status: upstream.status })
+  } catch (error: any) {
     console.error("Upload error:", error)
-    return NextResponse.json({ error: "Failed to upload document" }, { status: 500 })
+    return NextResponse.json(
+      { error: error?.message || "Failed to upload document" },
+      { status: 500 }
+    )
   }
 }

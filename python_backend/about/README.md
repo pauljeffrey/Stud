@@ -56,7 +56,7 @@ This directory contains comprehensive documentation about the Stud medical educa
 
 ## Getting Started
 
-1. **Setup Database**: Run `db/scripts/complete_schema.sql`
+1. **Setup Database**: Run `db/scripts/init_db.sql` in Supabase SQL Editor
 2. **Configure Environment**: Set up `.env` with API keys
 3. **Start Backend**: `docker-compose up` or `uvicorn main:app`
 4. **Start Frontend**: `cd frontend && npm run dev`

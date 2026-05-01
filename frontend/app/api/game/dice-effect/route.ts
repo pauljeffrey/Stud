@@ -1,32 +1,4 @@
-import { type NextRequest, NextResponse } from "next/server"
+import { proxy } from "@/app/lib/proxy"
 
-export async function POST(request: NextRequest) {
-  try {
-    const body = await request.json()
-
-    const pythonBackendUrl = process.env.PYTHON_BACKEND_URL || "http://localhost:8000"
-
-    const response = await fetch(`${pythonBackendUrl}/api/game/dice-effect`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    })
-
-    if (!response.ok) {
-      throw new Error("Failed to apply dice effect")
-    }
-
-    return new Response(response.body, {
-      headers: {
-        "Content-Type": "text/plain",
-        "Cache-Control": "no-cache",
-        Connection: "keep-alive",
-      },
-    })
-  } catch (error) {
-    console.error("Dice effect error:", error)
-    return NextResponse.json({ error: "Failed to apply dice effect" }, { status: 500 })
-  }
-}
+export const POST = (req: Request) =>
+  proxy(req, "/api/game/dice-effect", { stream: true })

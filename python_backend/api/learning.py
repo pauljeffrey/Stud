@@ -2,207 +2,444 @@
 Learning API endpoints
 Handles document upload, processing, and RAG-based chat
 """
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends, Query, Header
 from fastapi.responses import StreamingResponse
 from typing import Optional
+import hashlib
 import json
 import asyncio
 from datetime import datetime
 import uuid
+import logging
 
 from schema import LearningChatRequest
 from service.document_processor import get_document_processor
-from agents.rag_agent import get_rag_agent
-from config import config
-from supabase import create_client, Client
+from service.document_game_session import save_mediquest_session
+from service.database import get_database_service
+from agents.tutor_agent import get_tutor_agent
+from utils import get_chat_history_from_storage
+from api.auth_deps import (
+    get_current_user_id,
+    resolve_user_id,
+    resolve_user_id_or_query,
+)
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Initialize Supabase client
-supabase: Client = create_client(
-    config.SUPABASE_URL,
-    config.SUPABASE_SERVICE_ROLE_KEY
-)
-
-# Get document processor and RAG agent
+# Get services
 doc_processor = get_document_processor()
-rag_agent = get_rag_agent()
+tutor_agent = get_tutor_agent()
+db_service = get_database_service()
+
+
+@router.get("/learning/enrollments")
+async def list_learning_enrollments(
+    user_id: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+):
+    """List learning journeys (enrollments). JWT sets user; else user_id query (dev)."""
+    try:
+        uid = resolve_user_id_or_query(authorization, user_id)
+        rows = await db_service.list_user_enrollments(uid, limit=50)
+        return {"success": True, "enrollments": rows}
+    except Exception as e:
+        logger.error(f"List enrollments error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to list enrollments")
+
+
+@router.get("/learning/documents")
+async def list_documents(user_id: str = Depends(get_current_user_id)):
+    """
+    List user's uploaded documents (file_name, id, expiry status).
+    Used by quiz page when source is 'from document'.
+    """
+    try:
+        docs = await db_service.get_user_documents(user_id, limit=50)
+        return {
+            "success": True,
+            "documents": [
+                {
+                    "id": d["id"],
+                    "file_name": d.get("file_name", d.get("name", "Untitled")),
+                    "processed": d.get("processed", False),
+                    "pinecone_index_name": d.get("pinecone_index_name"),
+                    "pinecone_index_expires_at": d.get("pinecone_index_expires_at"),
+                    "chunk_count": d.get("chunk_count", 0),
+                }
+                for d in docs
+            ],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"List documents error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to list documents")
 
 
 @router.post("/learning/upload")
 async def upload_document(
     file: UploadFile = File(...),
-    document_id: str = Form(...),
-    user_id: str = Form(...)
+    document_id: Optional[str] = Form(None),
+    user_id: Optional[str] = Form(None),
+    authorization: Optional[str] = Header(None),
 ):
-    """Upload and process document for learning"""
+    """
+    Upload and process document for learning.
+    If document_id is omitted, a deterministic ID is generated from a
+    hash of (user_id + file_name + content), so re-uploading the same
+    file is idempotent.
+    """
     try:
-        # Read file content
         content = await file.read()
-        
-        # Process document (extract text, chunk, embed, store in Pinecone)
+        file_name = file.filename or "untitled"
+        uid = resolve_user_id(
+            authorization,
+            user_id.strip() if user_id and str(user_id).strip() else None,
+        )
+
+        if not document_id:
+            content_hash = hashlib.sha256(
+                f"{uid}:{file_name}".encode() + content
+            ).hexdigest()[:16]
+            document_id = f"doc_{content_hash}"
+
+        existing = await db_service.get_document(document_id)
+        if existing and existing.get("processed"):
+            return {
+                "success": True,
+                "message": "Document already processed",
+                "document_id": existing["id"],
+                "chunk_count": existing.get("chunk_count", 0),
+                "expires_at": existing.get("pinecone_index_expires_at"),
+                "already_exists": True,
+            }
+
         result = await doc_processor.process_document(
             file_content=content,
-            file_name=file.filename,
+            file_name=file_name,
             file_type=file.content_type or "application/octet-stream",
-            user_id=user_id,
+            user_id=uid,
             document_id=document_id
         )
-        
+
         return {
             "success": True,
             "message": "Document uploaded and processed",
             "document_id": result["document_id"],
             "chunk_count": result["chunk_count"],
-            "expires_at": result["expires_at"]
+            "expires_at": result["expires_at"],
+            "s3_key": result.get("s3_key"),
         }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.error(f"Document upload error: {e}")
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 
 @router.post("/learning/chat")
-async def learning_chat(request: LearningChatRequest):
-    """Chat with document using RAG"""
-    
+async def learning_chat(
+    request: LearningChatRequest,
+    authorization: Optional[str] = Header(None),
+):
+    """
+    Chat with document using RAG.
+    Retrieves chat history from storage and saves new messages.
+    Returns generate_quiz/play_quest flags when user asks to switch modes.
+    """
+    user_id = resolve_user_id(authorization, request.user_id)
+
     async def generate_learning_response():
         try:
-            # Use RAG agent to answer question
-            response = await rag_agent.answer_question(
-                question=request.message,
-                document_id=request.document_id,
-                chat_history=request.chat_history
+            document_id = request.document_id
+            if request.enrollment_id and not document_id:
+                en_row = await db_service.get_user_enrollment(request.enrollment_id)
+                if en_row and str(en_row.get("user_id")) == str(user_id):
+                    document_id = str(en_row.get("document_id"))
+            if not document_id:
+                raise ValueError("Could not resolve document for this session")
+
+            session_id = (
+                request.session_id
+                or request.enrollment_id
+                or document_id
             )
-            
-            # Save chat history
-            supabase.table("learning_chat_history").insert({
-                "user_id": "user_123",  # Get from auth in production
-                "document_id": request.document_id,
-                "role": "user",
-                "content": request.message,
-                "created_at": datetime.now().isoformat()
-            }).execute()
-            
-            supabase.table("learning_chat_history").insert({
-                "user_id": "user_123",
-                "document_id": request.document_id,
-                "role": "assistant",
-                "content": response["answer"],
-                "sources": json.dumps(response.get("sources", [])),
-                "created_at": datetime.now().isoformat()
-            }).execute()
-            
-            # Stream the response
+
+            profession = request.profession
+            subject_of_study = request.subject_of_study
+            if not profession or not subject_of_study:
+                user = await db_service.get_user(user_id)
+                if user:
+                    profession = profession or user.get("profession")
+                    subject_of_study = subject_of_study or user.get("field_of_study") or profession
+
+            filenames = []
+            docs = await db_service.get_user_documents(user_id, limit=20)
+            for d in docs:
+                fn = d.get("file_name") or d.get("name") or "Untitled"
+                filenames.append(fn)
+
+            chat_history = await get_chat_history_from_storage(
+                user_id=user_id,
+                conversation_id=session_id,
+                chat_type="tutor",
+                document_id=document_id,
+            )
+
+            response = await tutor_agent.chat(
+                user_id=user_id,
+                user_message=request.message,
+                document_id=document_id,
+                session_id=session_id,
+                chat_history=chat_history,
+                profession=profession,
+                subject_of_study=subject_of_study,
+                filenames=filenames,
+                enrollment_id=request.enrollment_id,
+            )
+
             words = response["answer"].split()
             for i, word in enumerate(words):
+                is_last = i == len(words) - 1
                 chunk = {
                     "content": word + " ",
-                    "sources": response.get("sources", []) if i == len(words) - 1 else None
+                    "sources": response.get("sources", []) if is_last else None,
+                    "complete": is_last
                 }
+                if is_last:
+                    chunk["generate_quiz"] = response.get("generate_quiz", False)
+                    chunk["play_quest"] = response.get("play_quest", False)
+                    chunk["document_id"] = response.get("document_id")
+                    chunk["enrollment_id"] = response.get("enrollment_id")
                 yield f"data: {json.dumps(chunk)}\n\n"
                 await asyncio.sleep(0.05)
-                
+
         except Exception as e:
-            error_chunk = {"error": str(e)}
+            logger.error(f"Learning chat error: {e}")
+            error_chunk = {"error": str(e), "complete": True}
             yield f"data: {json.dumps(error_chunk)}\n\n"
     
     return StreamingResponse(
         generate_learning_response(),
-        media_type="text/plain",
-        headers={"Cache-Control": "no-cache"}
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
     )
 
 
 @router.delete("/learning/documents/{document_id}")
-async def delete_document(document_id: str):
-    """Delete a document and its Pinecone index"""
+async def delete_document(document_id: str, user_id: Optional[str] = None):
+    """
+    Delete a document and its Pinecone index.
+    Also deletes from S3 if S3 storage is enabled.
+    """
     try:
+        from service.s3_service import get_s3_service
+        
         # Get document info
-        doc_result = supabase.table("documents").select("pinecone_index_name").eq("id", document_id).execute()
+        doc = await db_service.get_document(document_id)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
         
-        if doc_result.data:
-            index_name = doc_result.data[0].get("pinecone_index_name")
-            if index_name:
-                # Delete Pinecone index
-                try:
-                    await doc_processor.pinecone.delete_index(index_name)
-                except Exception as e:
-                    print(f"Error deleting Pinecone index: {str(e)}")
+        # Delete Pinecone index
+        index_name = doc.get("pinecone_index_name")
+        if index_name:
+            try:
+                await doc_processor.pinecone.delete_index(index_name)
+            except Exception as e:
+                logger.warning(f"Error deleting Pinecone index: {e}")
         
-        # Delete from Supabase
-        result = supabase.table("documents").delete().eq("id", document_id).execute()
+        # Delete from S3 if enabled
+        s3_service = get_s3_service()
+        if s3_service.enabled and doc.get("s3_key"):
+            await s3_service.delete_file(
+                user_id=doc["user_id"],
+                document_id=document_id,
+                file_name=doc["file_name"]
+            )
+        
+        # Delete from database
+        await db_service.update_document(document_id, {"is_active": False})
+        # Or delete completely:
+        # supabase.table("documents").delete().eq("id", document_id).execute()
         
         return {"success": True, "message": "Document deleted"}
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.error(f"Delete document error: {e}")
         raise HTTPException(status_code=500, detail=f"Delete failed: {str(e)}")
+
+
+@router.post("/learning/reingest/{document_id}")
+async def reingest_document(document_id: str, user_id: str):
+    """
+    Re-ingest an expired document from S3.
+    Useful when a document has expired from vector DB but is still in S3.
+    """
+    try:
+        result = await doc_processor.reingest_expired_document(
+            document_id=document_id,
+            user_id=user_id
+        )
+        
+        return {
+            "success": True,
+            "message": "Document re-ingested successfully",
+            "document_id": result["document_id"],
+            "chunk_count": result["chunk_count"],
+            "expires_at": result["expires_at"]
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Re-ingestion error: {e}")
+        raise HTTPException(status_code=500, detail=f"Re-ingestion failed: {str(e)}")
 
 
 @router.post("/learning/generate-quiz-from-document")
 async def generate_quiz_from_document(
     document_id: str = Form(...),
-    quiz_type: str = Form(...),
-    num_questions: int = Form(...),
-    time_limit: int = Form(...)
+    quiz_type: str = Form("general"),
+    num_questions: int = Form(10),
+    time_limit: int = Form(600),
+    num_multiple_choice: Optional[int] = Form(None),
+    num_open_ended: Optional[int] = Form(None),
+    num_true_false: Optional[int] = Form(None),
+    user_id: Optional[str] = Form(None)
 ):
     """Generate a quiz based on document content"""
     try:
-        # Get document content
-        doc_result = supabase.table("documents").select("content").eq("id", document_id).execute()
-        if not doc_result.data:
+        # Get document
+        doc = await db_service.get_document(document_id)
+        if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
         
-        document_content = doc_result.data[0].get("content", "")
+        document_content = doc.get("content", "")
         
-        # Use quiz agent to generate quiz (import from quiz_agent)
-        from quiz_agent import generate_quiz
-        quiz = await generate_quiz(
-            quiz_type=quiz_type,
+        # Use quiz agent to generate quiz
+        from agents.quiz_agent import get_quiz_agent
+        quiz_agent = get_quiz_agent()
+        
+        quiz = await quiz_agent.generate_quiz(
+            from_document=True,
+            document_id=document_id,
             num_questions=num_questions,
+            quiz_type=quiz_type,
             time_limit=time_limit,
+            num_multiple_choice=num_multiple_choice,
+            num_open_ended=num_open_ended,
+            num_true_false=num_true_false,
             context=document_content
         )
         
         # Save quiz with document reference
-        quiz_data = quiz.dict()
-        quiz_data["document_id"] = document_id
-        result = supabase.table("quizzes").insert(quiz_data).execute()
+        quiz_data = quiz.model_dump(mode="json")
+        await db_service.create_quiz(
+            user_id=user_id or doc["user_id"],
+            title=quiz.title,
+            questions=quiz_data["questions"],
+            quiz_type=quiz_type,
+            time_limit=time_limit,
+            total_questions=quiz.totalQuestions,
+            source="document",
+            document_id=document_id
+        )
         
         return quiz_data
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.error(f"Quiz generation error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to generate quiz: {str(e)}")
 
 
 @router.post("/learning/generate-game-from-document")
 async def generate_game_from_document(
     document_id: str = Form(...),
+    user_id: Optional[str] = Form(None),
     profession: Optional[str] = Form(None),
     era: Optional[str] = Form(None),
-    natural_condition: Optional[str] = Form(None)
+    natural_condition: Optional[str] = Form(None),
 ):
-    """Generate a game scenario based on document content"""
+    """Generate a Mediquest game scenario grounded in the uploaded document."""
     try:
-        # Get document content
-        doc_result = supabase.table("documents").select("content").eq("id", document_id).execute()
-        if not doc_result.data:
+        doc = await db_service.get_document(document_id)
+        if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
-        
-        document_content = doc_result.data[0].get("content", "")
-        
-        # Use GameMaster to generate scenario
-        from agents.game_master import get_game_master
-        game_master = get_game_master()
-        
-        scenario = await game_master.generate_scenario(
-            prompt="Generate a medical scenario based on the document",
-            from_document=True,
-            document_content=document_content,
-            profession=profession,
+
+        uid = user_id or doc.get("user_id", "user_123")
+        prof = profession
+        if not prof:
+            user = await db_service.get_user(uid)
+            prof = (user or {}).get("profession", "healthcare Professional")
+
+        from models.states import GameConfig, UserDetails, DifficultyLevel
+        from agents.game_master import get_game_master_agent
+
+        game_config = GameConfig(
+            profession=prof,
             era=era,
-            natural_condition=natural_condition
+            natural_conditions=natural_condition,
+            from_document=True,
+            document_id=document_id,
+            total_cases=5,
         )
-        
+        user_details = UserDetails(user_id=uid, profession=prof)
+        game_master = get_game_master_agent()
+
+        game_world, game_state, case_state, npc_states, previous_cases = (
+            await game_master.initialize_game(
+                game_config=game_config,
+                user_id=uid,
+                user_details=user_details,
+            )
+        )
+
+        state_payload = game_state.model_dump(mode="json", default=str)
+        await save_mediquest_session(
+            str(game_state.game_id),
+            document_id=document_id,
+            ordered_game_ids=[str(game_state.game_id)],
+            current_index=0,
+            mode={
+                "from_document": True,
+                "total_cases": getattr(game_state, "total_cases", None),
+            },
+            stages=["game_initialized"],
+        )
+        try:
+            await db_service.create_game_state(
+                user_id=uid,
+                case_id=game_state.case_id,
+                state=state_payload,
+                document_id=document_id,
+            )
+        except Exception as db_err:
+            logger.warning(f"Failed to persist game state: {db_err}")
+
         return {
             "success": True,
-            "scenario": scenario.dict()
+            "game_id": game_state.game_id,
+            "game_state": state_payload,
         }
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.error(f"Game generation error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to generate game: {str(e)}")
+
+
+@router.post("/learning/mark-task-completed")
+async def mark_task_completed(
+    study_plan_id: str = Form(...),
+    task_id: str = Form(...),
+):
+    """Mark a study-plan daily task as completed (REST alternative to the tutor tool)."""
+    ok = await db_service.mark_study_plan_task_completed(study_plan_id, task_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Task or study plan not found")
+    return {"success": True, "task_id": task_id}

@@ -19,6 +19,8 @@ import {
   ArrowLeft,
   Trophy,
   Brain,
+  FileText,
+  Upload,
 } from "lucide-react"
 import { useToast } from "@/app/components/ui/use-toast"
 import { motion, AnimatePresence } from "framer-motion"
@@ -66,6 +68,34 @@ export default function QuizPage() {
     source: "ai_knowledge" as "ai_knowledge" | "document",
     document_id: ""
   })
+  const [documents, setDocuments] = useState<{ id: string; file_name: string; processed?: boolean }[]>([])
+  const [documentsLoading, setDocumentsLoading] = useState(false)
+  const [uploadingDoc, setUploadingDoc] = useState(false)
+
+  useEffect(() => {
+    if (quizConfig.source === "document") {
+      setDocumentsLoading(true)
+      const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
+      if (token) {
+        fetch("/api/learning/documents", {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+          .then((r) => r.json())
+          .then((data) => {
+            if (data.success && data.documents) {
+              setDocuments(data.documents)
+            }
+          })
+          .catch(() => setDocuments([]))
+          .finally(() => setDocumentsLoading(false))
+      } else {
+        setDocuments([])
+        setDocumentsLoading(false)
+      }
+    } else {
+      setDocuments([])
+    }
+  }, [quizConfig.source])
 
   useEffect(() => {
     if (quiz && quiz.timeLimit > 0) {
@@ -88,9 +118,45 @@ export default function QuizPage() {
     }
   }, [timeRemaining, quiz, showResults])
 
+  const handleDocumentUpload = async (file: File) => {
+    const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
+    const userStr = typeof window !== "undefined" ? localStorage.getItem("user") : null
+    const user = userStr ? JSON.parse(userStr) : null
+    const userId = user?.id || "user_123"
+    if (!token) {
+      toast({ title: "Login required", description: "Please log in to upload documents", variant: "destructive" })
+      return
+    }
+    setUploadingDoc(true)
+    try {
+      const formData = new FormData()
+      formData.append("file", file)
+      formData.append("document_id", `doc_${Date.now()}_${Math.random().toString(36).slice(2)}`)
+      formData.append("user_id", userId)
+      const res = await fetch("/api/learning/upload", { method: "POST", body: formData })
+      const data = await res.json()
+      if (data.document_id) {
+        setDocuments((prev) => [{ id: data.document_id, file_name: file.name, processed: true }, ...prev])
+        setQuizConfig((c) => ({ ...c, document_id: data.document_id }))
+        toast({ title: "Document uploaded", description: `Processed ${data.chunk_count || 0} chunks` })
+      } else throw new Error(data.message || "Upload failed")
+    } catch (e: any) {
+      toast({ title: "Upload failed", description: e.message || "Failed to upload", variant: "destructive" })
+    } finally {
+      setUploadingDoc(false)
+    }
+  }
+
   const handleGenerateQuiz = async () => {
+    if (quizConfig.source === "document" && !quizConfig.document_id) {
+      toast({ title: "Select a document", description: "Choose a document or upload one first", variant: "destructive" })
+      return
+    }
     setIsGenerating(true)
     try {
+      const userStr = typeof window !== "undefined" ? localStorage.getItem("user") : null
+      const user = userStr ? JSON.parse(userStr) : null
+      const userId = user?.id || undefined
       const response = await fetch("/api/quiz/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -98,19 +164,15 @@ export default function QuizPage() {
           quiz_type: quizConfig.quiz_type,
           num_questions: quizConfig.num_questions,
           time_limit: quizConfig.time_limit,
-          file: null,
-          ...(quizConfig.source === "document" && quizConfig.document_id ? { document_id: quizConfig.document_id } : {}),
-          quiz_type: quizConfig.quiz_type,
-          num_questions: quizConfig.num_questions,
           num_multiple_choice: quizConfig.num_multiple_choice,
           num_open_ended: quizConfig.num_open_ended,
-          time_limit: quizConfig.time_limit,
           source: quizConfig.source,
           document_id: quizConfig.document_id || undefined,
           model_name: modelConfig.model_name || undefined,
           api_key: modelConfig.api_key || undefined,
           provider: modelConfig.provider,
-          use_internet: true
+          use_internet: true,
+          user_id: userId,
         })
       })
 
@@ -410,13 +472,54 @@ export default function QuizPage() {
 
                 {quizConfig.source === "document" && (
                   <div className="space-y-2">
-                    <Label>Document ID</Label>
-                    <Input
-                      value={quizConfig.document_id}
-                      onChange={(e) => setQuizConfig({ ...quizConfig, document_id: e.target.value })}
-                      placeholder="Enter document ID"
-                      className="bg-black/50 border-purple-700/40"
-                    />
+                    <Label>Select Document</Label>
+                    <div className="flex gap-2">
+                      <div className="flex-1 min-h-0 flex flex-col gap-2">
+                        <div className="border border-purple-700/40 rounded-lg bg-black/50 max-h-32 overflow-y-auto p-2 space-y-1">
+                          {documentsLoading ? (
+                            <div className="flex items-center gap-2 text-gray-400 py-2">
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                              <span className="text-sm">Loading documents...</span>
+                            </div>
+                          ) : documents.length === 0 ? (
+                            <p className="text-sm text-gray-400 py-2">No documents yet. Upload one below.</p>
+                          ) : (
+                            documents.map((doc) => (
+                              <button
+                                key={doc.id}
+                                type="button"
+                                onClick={() => setQuizConfig((c) => ({ ...c, document_id: doc.id }))}
+                                className={`w-full text-left px-3 py-2 rounded-md text-sm truncate transition-colors ${
+                                  quizConfig.document_id === doc.id
+                                    ? "bg-purple-700/50 border border-purple-500"
+                                    : "hover:bg-purple-900/30 border border-transparent"
+                                }`}
+                              >
+                                <FileText className="h-4 w-4 inline mr-2 text-purple-400" />
+                                {doc.file_name}
+                              </button>
+                            ))
+                          )}
+                        </div>
+                        <label className="flex items-center justify-center gap-2 px-3 py-2 border border-dashed border-purple-700/40 rounded-lg cursor-pointer hover:bg-purple-900/20 transition-colors">
+                          <Upload className="h-4 w-4" />
+                          <span className="text-sm">
+                            {uploadingDoc ? "Uploading..." : "Upload new document"}
+                          </span>
+                          <input
+                            type="file"
+                            className="hidden"
+                            accept=".pdf,.doc,.docx,.pptx,.txt,image/*"
+                            disabled={uploadingDoc}
+                            onChange={(e) => {
+                              const f = e.target.files?.[0]
+                              if (f) handleDocumentUpload(f)
+                              e.target.value = ""
+                            }}
+                          />
+                        </label>
+                      </div>
+                    </div>
                   </div>
                 )}
 

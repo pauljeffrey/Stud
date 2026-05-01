@@ -14,7 +14,7 @@ class Config:
     GAME_MASTER_MODEL_NAME = os.getenv("GAME_MASTER_MODEL_NAME")
     NPC_MODEL_NAME = os.getenv("NPC_MODEL_NAME")
     DICE_MODEL_NAME = os.getenv("DICE_MODEL_NAME")
-    RAG_MODEL_NAME=os.getenv("RAG_MODEL_NAME")
+    TUTOR_MODEL_NAME=os.getenv("RAG_MODEL_NAME")
     STATE_CONTROLLER_MODEL_NAME = os.getenv("STATE_CONTROLLER_MODEL_NAME")
     QUIZ_MODEL_NAME=os.getenv("QUIZ_MODEL_NAME")
     GAME_WORLD_MODEL_NAME=os.getenv("GAME_WORLD_MODEL_MODEL_NAME")
@@ -83,7 +83,19 @@ class Config:
     # Agent Timeout Configuration (Production defaults)
     AGENT_TIMEOUT = float(os.getenv("AGENT_TIMEOUT", "60.0"))  # Production: 60s, Free tier: 30s
     AGENT_SPECIFIC_TIMEOUT = float(os.getenv("AGENT_SPECIFIC_TIMEOUT", "55.0"))  # Slightly less than AGENT_TIMEOUT
-    MODEL_TIMEOUT = float(os.getenv("MODEL_TIMEOUT", "30.0"))  # Model-level timeout 
+    MODEL_TIMEOUT = float(os.getenv("MODEL_TIMEOUT", "30.0"))  # Model-level timeout
+
+    # Document Mediquest: smaller persisted chunks; agents pull adjacent rows as needed
+    DOCUMENT_CHUNK_WORDS = int(os.getenv("DOCUMENT_CHUNK_WORDS", "1000"))
+    DOCUMENT_CHUNK_OVERLAP = int(os.getenv("DOCUMENT_CHUNK_OVERLAP", "200"))
+    MAX_EXTRACTED_WORDS = int(os.getenv("MAX_EXTRACTED_WORDS", "200000"))  # cap before chunking (memory)
+    DOCUMENT_GAME_MAX_CASES = int(os.getenv("DOCUMENT_GAME_MAX_CASES", "20"))
+    DOCUMENT_GAME_RELEVANCE_THRESHOLD = float(os.getenv("DOCUMENT_GAME_RELEVANCE_THRESHOLD", "0.35"))
+    DOCUMENT_GAME_MAX_REFINE_TOOL_ROUNDS = int(os.getenv("DOCUMENT_GAME_MAX_REFINE_TOOL_ROUNDS", "8"))
+    DOCUMENT_GAME_JOB_REDIS_TTL = int(os.getenv("DOCUMENT_GAME_JOB_TTL", str(7 * 24 * 3600)))
+    DOCUMENT_GAME_LLM_BUDGET_UNITS = int(os.getenv("DOCUMENT_GAME_LLM_BUDGET_UNITS", "500000"))  # soft cap per job
+    # Optional: prefix Redis keys for job queue (worker drains in production)
+    DOCUMENT_GAME_QUEUE_KEY = os.getenv("DOCUMENT_GAME_QUEUE_KEY", "jobs:document_game")
    
 
 config = Config()

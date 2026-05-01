@@ -108,6 +108,44 @@ export default function MediquestPage() {
     provider: "google"
   })
 
+  useEffect(() => {
+    const loadApiConfig = () => {
+      const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
+      if (token) {
+        fetch("/api/user/settings", { headers: { Authorization: `Bearer ${token}` } })
+          .then((r) => r.json())
+          .then((data) => {
+            const s = data.settings || {}
+            if (s.provider || s.modelName || s.apiKey) {
+              setModelConfig({
+                provider: s.provider || "google",
+                model_name: s.modelName || "",
+                api_key: s.apiKey || "",
+              })
+            }
+          })
+          .catch(() => {})
+      } else {
+        try {
+          const stored = localStorage.getItem("apiSettings") || localStorage.getItem("api_settings")
+          if (stored) {
+            const s = JSON.parse(stored)
+            if (s?.provider || s?.modelName || s?.apiKey) {
+              setModelConfig({
+                provider: s.provider || "google",
+                model_name: s.modelName || "",
+                api_key: s.apiKey || "",
+              })
+            }
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+    loadApiConfig()
+  }, [])
+
   const chatEndRef = useRef<HTMLDivElement>(null)
   const gameMasterChatEndRef = useRef<HTMLDivElement>(null)
 

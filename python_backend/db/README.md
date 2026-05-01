@@ -1,62 +1,43 @@
-# Database Schema Documentation
+# Stud Database
 
 ## Overview
-This directory contains SQL scripts for creating all database tables required by the Stud application.
 
-## Schema Files
+This directory contains the database initialization script for the Stud application. All tables, indexes, triggers, and seed data are defined in a single script.
 
-### `complete_schema.sql`
-**Complete database schema** - Contains all tables referenced in the application:
-- All tables from `database_schema.sql` (original schema)
-- All tables from `database_schema_v2.sql` (updated schema)
-- All tables referenced in `api/user.py`
-- All tables referenced in `api/game_v2.py`
+## Setup
 
-### Tables Included
+### Run in Supabase SQL Editor
 
-#### Authentication & User Management
-- `users` - User accounts and profiles
-- `user_sessions` - Active user sessions
+1. Open your Supabase project dashboard
+2. Go to **SQL Editor**
+3. Copy the contents of `scripts/init_db.sql`
+4. Paste and run
 
-#### Game Management
-- `game_states` - Current game states (with is_demo flag)
-- `game_checkpoints` - Saved game checkpoints
-- `game_statistics` - User game statistics
-- `game_creation_log` - Game creation tracking
-- `user_performance` - Performance analysis per clinical case
+### Run via psql
 
-#### Quiz Management
-- `quizzes` - Quiz definitions
-- `quiz_results` - Quiz attempt results
-- `saved_quizzes` - User's favorite quizzes
-- `quiz_statistics` - User quiz statistics
-
-#### Learning & Documents
-- `documents` - Uploaded documents (with expiry)
-- `document_chunks` - Document chunks with embeddings (pgvector)
-- `learning_chat_history` - Chat history for document learning
-
-#### Achievements & Progression
-- `achievements` - User achievements
-- `achievement_definitions` - Achievement definitions
-- `user_achievements` - User achievement progress tracking
-- `user_progression` - User level and XP
-
-## Usage
-
-To set up the database, run:
-
-```sql
--- Run the complete schema
-\i db/scripts/complete_schema.sql
+```bash
+psql "postgresql://postgres:[PASSWORD]@db.[PROJECT_REF].supabase.co:5432/postgres" -f db/scripts/init_db.sql
 ```
 
-Or execute the SQL file directly in your PostgreSQL/Supabase database.
+## Script: `init_db.sql`
 
-## Notes
+**Single source of truth** for all database objects. Idempotent (safe to run multiple times).
 
-- All tables include proper indexes for performance
-- Foreign key constraints ensure data integrity
-- Triggers automatically update `updated_at` timestamps
-- Functions handle statistics updates automatically
-- RLS (Row Level Security) policies can be added as needed
+### Tables Created
+
+| Category | Tables |
+|----------|--------|
+| **Auth & Users** | `users`, `user_sessions` |
+| **Documents** | `documents`, `document_chunks` |
+| **Games** | `game_states`, `game_checkpoints`, `game_statistics`, `game_creation_log`, `user_performance`, `game_previous_cases` |
+| **Quizzes** | `quizzes`, `quiz_results`, `saved_quizzes`, `quiz_statistics` |
+| **Learning** | `learning_chat_history`, `tutor_chat_history`, `curricula`, `study_plans`, `user_enrollments` |
+| **Chat** | `game_master_chat_history`, `npc_chat_history` |
+| **Progress** | `achievements`, `achievement_definitions`, `user_achievements`, `user_progression` |
+
+### Includes
+
+- Extensions: `uuid-ossp`, `vector` (pgvector)
+- Indexes for performance
+- Triggers for `updated_at`, game/quiz statistics
+- Seed data: achievement definitions

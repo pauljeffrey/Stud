@@ -4,14 +4,25 @@ import type React from "react"
 import Link from "next/link"
 import { useState } from "react"
 import { Button } from "@/app/components/ui/button"
-import { Menu, X, Gamepad2, BookOpen, Brain, Info, HelpCircle } from "lucide-react"
-import { usePathname } from "next/navigation"
+import { Menu, X, Gamepad2, BookOpen, Brain, Info, HelpCircle, LayoutDashboard, LogOut } from "lucide-react"
+import { usePathname, useRouter } from "next/navigation"
 import { cn } from "@/lib/utils"
 import { motion } from "framer-motion"
+import { useAuth } from "@/app/lib/auth"
 
 export default function Navbar() {
   const [isMenuOpen, setIsMenuOpen] = useState(false)
   const pathname = usePathname()
+  const router = useRouter()
+  const { isAuthenticated, logout } = useAuth()
+  const isLoggedIn = isAuthenticated
+
+  const handleLogout = async () => {
+    await logout()
+    setIsMenuOpen(false)
+    localStorage.removeItem("session_token")
+    router.push("/auth/login")
+  }
 
   // Don't show navbar on game page
   if (pathname === "/mediquest" || pathname === "/game") return null
@@ -106,33 +117,54 @@ export default function Navbar() {
               How to Use
             </span>
           </NavLink>
-          <div className="flex space-x-2">
-            <Link href="/auth/login">
-              <Button variant="ghost" className="text-white hover:bg-purple-800">
-                Login
-              </Button>
-            </Link>
-            <Link href="/auth/register">
-              <motion.div
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-              >
-                <Button className="bg-gradient-to-r from-purple-700 to-purple-900 hover:from-purple-800 hover:to-purple-950 relative overflow-hidden">
-                  <motion.div
-                    className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent"
-                    animate={{
-                      x: ["-100%", "100%"],
-                    }}
-                    transition={{
-                      duration: 2,
-                      repeat: Infinity,
-                      ease: "linear"
-                    }}
-                  />
-                  <span className="relative z-10">Register</span>
+          <div className="flex items-center space-x-2">
+            {isLoggedIn ? (
+              <>
+                <Link href="/dashboard">
+                  <Button variant="ghost" className="text-white hover:bg-purple-800">
+                    <LayoutDashboard className="h-4 w-4 mr-1" />
+                    Dashboard
+                  </Button>
+                </Link>
+                <Button
+                  variant="ghost"
+                  className="text-white hover:bg-purple-800"
+                  onClick={handleLogout}
+                >
+                  <LogOut className="h-4 w-4 mr-1" />
+                  Logout
                 </Button>
-              </motion.div>
-            </Link>
+              </>
+            ) : (
+              <>
+                <Link href="/auth/login">
+                  <Button variant="ghost" className="text-white hover:bg-purple-800">
+                    Login
+                  </Button>
+                </Link>
+                <Link href="/auth/register">
+                  <motion.div
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                  >
+                    <Button className="bg-gradient-to-r from-purple-700 to-purple-900 hover:from-purple-800 hover:to-purple-950 relative overflow-hidden">
+                      <motion.div
+                        className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent"
+                        animate={{
+                          x: ["-100%", "100%"],
+                        }}
+                        transition={{
+                          duration: 2,
+                          repeat: Infinity,
+                          ease: "linear"
+                        }}
+                      />
+                      <span className="relative z-10">Register</span>
+                    </Button>
+                  </motion.div>
+                </Link>
+              </>
+            )}
           </div>
         </div>
 
@@ -182,16 +214,37 @@ export default function Navbar() {
               </span>
             </NavLink>
             <div className="flex flex-col space-y-2 pt-4 border-t border-purple-500/30">
-              <Link href="/auth/login" onClick={() => setIsMenuOpen(false)}>
-                <Button variant="ghost" className="w-full text-white hover:bg-purple-800">
-                  Login
-                </Button>
-              </Link>
-              <Link href="/auth/register" onClick={() => setIsMenuOpen(false)}>
-                <Button className="w-full bg-gradient-to-r from-purple-700 to-purple-900 hover:from-purple-800 hover:to-purple-950">
-                  Register
-                </Button>
-              </Link>
+              {isLoggedIn ? (
+                <>
+                  <Link href="/dashboard" onClick={() => setIsMenuOpen(false)}>
+                    <Button variant="ghost" className="w-full text-white hover:bg-purple-800">
+                      <LayoutDashboard className="h-4 w-4 mr-2 inline" />
+                      Dashboard
+                    </Button>
+                  </Link>
+                  <Button
+                    variant="ghost"
+                    className="w-full text-white hover:bg-purple-800"
+                    onClick={() => { handleLogout(); setIsMenuOpen(false); }}
+                  >
+                    <LogOut className="h-4 w-4 mr-2 inline" />
+                    Logout
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <Link href="/auth/login" onClick={() => setIsMenuOpen(false)}>
+                    <Button variant="ghost" className="w-full text-white hover:bg-purple-800">
+                      Login
+                    </Button>
+                  </Link>
+                  <Link href="/auth/register" onClick={() => setIsMenuOpen(false)}>
+                    <Button className="w-full bg-gradient-to-r from-purple-700 to-purple-900 hover:from-purple-800 hover:to-purple-950">
+                      Register
+                    </Button>
+                  </Link>
+                </>
+              )}
             </div>
           </motion.div>
         )}

@@ -145,7 +145,7 @@ export default function GamePage() {
     // Animate dice roll
     await new Promise((resolve) => setTimeout(resolve, 1000))
 
-    const diceResult = Math.floor(Math.random() * 6) + 1
+    const diceResult = Math.floor(Math.random() * 11)
 
     setGameState((prev) => ({
       ...prev,
@@ -172,8 +172,8 @@ export default function GamePage() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          gameState,
-          diceResult,
+          game_state: gameState,
+          dice_result: diceResult,
         }),
       })
 
@@ -735,9 +735,9 @@ export default function GamePage() {
                 <div className="text-center">
                   <p className="text-4xl font-bold text-yellow-400 mb-2">{gameState.gameProgress.lastDiceResult}</p>
                   <p className="text-purple-200">
-                    {gameState.gameProgress.lastDiceResult >= 5
+                    {gameState.gameProgress.lastDiceResult >= 7
                       ? "Favorable outcome!"
-                      : gameState.gameProgress.lastDiceResult >= 3
+                      : gameState.gameProgress.lastDiceResult >= 4
                         ? "Moderate change"
                         : "Challenging situation!"}
                   </p>

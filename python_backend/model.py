@@ -18,20 +18,40 @@ API_KEY = os.getenv("MODEL_API_KEY")
 
 
 def select_model(MODEL_NAME, API_KEY):
-    if 'gemini' in MODEL_NAME:
+    """
+    Select and initialize a model based on model name and API key
+    
+    Args:
+        MODEL_NAME: Name of the model (e.g., 'gemini-2.0-flash', 'gpt-4o', 'claude-3-5-sonnet-latest')
+        API_KEY: API key for the model provider
+        
+    Returns:
+        tuple: (model, agent)
+    """
+    if not MODEL_NAME:
+        MODEL_NAME = "gemini-2.0-flash"  # Default fallback
+    
+    MODEL_NAME_LOWER = MODEL_NAME.lower()
+    
+    if 'gemini' in MODEL_NAME_LOWER:
         model = GeminiModel(
             MODEL_NAME, provider=GoogleGLAProvider(api_key=API_KEY)
         )
-    elif 'claude' in MODEL_NAME:
+    elif 'claude' in MODEL_NAME_LOWER:
         model = AnthropicModel(
-            'claude-3-5-sonnet-latest', provider=AnthropicProvider(api_key='your-api-key')
+            MODEL_NAME, provider=AnthropicProvider(api_key=API_KEY)
         )
-    elif 'gpt' in MODEL_NAME:
+    elif 'gpt' in MODEL_NAME_LOWER or 'openai' in MODEL_NAME_LOWER:
         model = OpenAIModel(
-            'gpt-4o', provider=OpenAIProvider(api_key='your-api-key')
-            )
+            MODEL_NAME, provider=OpenAIProvider(api_key=API_KEY)
+        )
     else:
-        pass
+        # Default to Gemini if model type not recognized
+        model = GeminiModel(
+            MODEL_NAME or "gemini-2.0-flash", 
+            provider=GoogleGLAProvider(api_key=API_KEY)
+        )
+    
     agent = Agent(model)
     
     return model, agent
