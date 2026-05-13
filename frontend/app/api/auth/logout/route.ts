@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server"
+import { sessionCookieSuffix } from "@/app/lib/session-cookie"
 
 /** Logout proxy. Best-effort: never block the client on backend failure. */
 export async function POST(request: Request) {
@@ -15,9 +16,6 @@ export async function POST(request: Request) {
     /* ignore */
   }
   const headers = new Headers()
-  headers.append(
-    "Set-Cookie",
-    "session_token=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0"
-  )
+  headers.append("Set-Cookie", `session_token=; ${sessionCookieSuffix(0)}`)
   return NextResponse.json({ success: true }, { headers })
 }

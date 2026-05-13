@@ -73,17 +73,30 @@ print_info "Creating necessary directories..."
 mkdir -p /tmp/uploads /tmp/images /tmp/audio
 print_success "Directories created"
 
-# Function to start uvicorn with auto-reload
-start_server() {
-    print_info "Starting Stud AI Backend Server..."
-    print_info "Server will auto-reload on code changes"
+# Function to start with Gunicorn + Uvicorn workers (production)
+start_server_production() {
+    local w="${GUNICORN_WORKERS:-4}"
+    print_info "Starting Stud AI Backend with Gunicorn ($w Uvicorn workers)"
+    print_info "DB_THREAD_POOL_SIZE=${DB_THREAD_POOL_SIZE:-512} REDIS_MAX_CONNECTIONS=${REDIS_MAX_CONNECTIONS:-200}"
+    echo ""
+    exec gunicorn main:app \
+        --worker-class uvicorn.workers.UvicornWorker \
+        --bind 0.0.0.0:8000 \
+        --workers "$w" \
+        --timeout "${GUNICORN_TIMEOUT:-120}" \
+        --graceful-timeout 30 \
+        --access-logfile - \
+        --error-logfile - \
+        --log-level info
+}
+
+# Function to start uvicorn with auto-reload (development)
+start_server_dev() {
+    print_info "Starting Stud AI Backend Server (development: uvicorn --reload)"
+    print_info "Set GUNICORN_WORKERS=4 (or any positive integer) to use Gunicorn in production"
     print_info "Press CTRL+C to stop"
     echo ""
-    
-    # Start uvicorn with auto-reload
-    # --reload: Enable auto-reload on code changes
-    # --reload-dir: Watch specific directories
-    # --log-level: Set log level
+
     exec uvicorn main:app \
         --host 0.0.0.0 \
         --port 8000 \
@@ -92,6 +105,14 @@ start_server() {
         --log-level info \
         --access-log \
         --use-colors
+}
+
+start_server() {
+    if [ -n "${GUNICORN_WORKERS}" ] && [ "${GUNICORN_WORKERS}" -gt 0 ] 2>/dev/null; then
+        start_server_production
+    else
+        start_server_dev
+    fi
 }
 
 # Retry logic for server startup

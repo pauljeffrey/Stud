@@ -270,21 +270,24 @@ export default function Home() {
         <div className="container mx-auto px-4">
           <motion.h2
             className="text-4xl md:text-5xl font-bold mb-12 text-center bg-gradient-to-r from-purple-400 via-purple-300 to-blue-400 bg-clip-text text-transparent"
+            initial={{ opacity: 0, y: 20 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
             animate={{
               backgroundPosition: ["0%", "100%", "0%"],
             }}
             transition={{
-              duration: 5,
-              repeat: Infinity,
-              ease: "linear"
+              opacity: { duration: 0.8 },
+              y: { duration: 0.8 },
+              backgroundPosition: {
+                duration: 5,
+                repeat: Infinity,
+                ease: "linear",
+              },
             }}
             style={{
               backgroundSize: "200% auto"
             }}
-            initial={{ opacity: 0, y: 20 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true }}
-            transition={{ duration: 0.8 }}
           >
             Three Powerful Modes
           </motion.h2>
@@ -327,9 +330,13 @@ export default function Home() {
           initial={{ opacity: 0, y: 20 }}
           whileInView={{ opacity: 1, y: 0 }}
           viewport={{ once: true }}
-          transition={{ duration: 0.8 }}
           animate={{
             backgroundPosition: ["0%", "100%", "0%"],
+          }}
+          transition={{
+            opacity: { duration: 0.8 },
+            y: { duration: 0.8 },
+            backgroundPosition: { duration: 5, repeat: Infinity, ease: "linear" },
           }}
           style={{
             backgroundSize: "200% auto"
@@ -378,10 +385,15 @@ export default function Home() {
           initial={{ opacity: 0, y: 20 }}
           whileInView={{ opacity: 1, y: 0 }}
           viewport={{ once: true }}
-          transition={{ duration: 0.8 }}
           animate={{
             backgroundPosition: ["0%", "100%", "0%"],
             scale: [1, 1.02, 1],
+          }}
+          transition={{
+            opacity: { duration: 0.8 },
+            y: { duration: 0.8 },
+            backgroundPosition: { duration: 5, repeat: Infinity, ease: "linear" },
+            scale: { duration: 3, repeat: Infinity, ease: "easeInOut" },
           }}
           style={{
             backgroundSize: "200% auto"
@@ -394,15 +406,17 @@ export default function Home() {
           initial={{ opacity: 0 }}
           whileInView={{ opacity: 1 }}
           viewport={{ once: true }}
-          transition={{ delay: 0.2, duration: 0.8 }}
           animate={{
             y: [0, -5, 0],
           }}
           transition={{
-            duration: 3,
-            repeat: Infinity,
-            ease: "easeInOut",
-            delay: 0.5
+            opacity: { delay: 0.2, duration: 0.8 },
+            y: {
+              duration: 3,
+              repeat: Infinity,
+              ease: "easeInOut",
+              delay: 0.5,
+            },
           }}
         >
           Join healthcare professionals worldwide in mastering medicine through gamified learning

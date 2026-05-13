@@ -412,6 +412,14 @@ export default function DashboardPage() {
     )
   }
 
+  if (!userStats) {
+    return (
+      <div className="min-h-screen bg-gradient-to-b from-purple-900 via-purple-800 to-purple-900 p-4 flex items-center justify-center">
+        <p className="text-purple-200">Unable to load dashboard. Try refreshing or sign in again.</p>
+      </div>
+    )
+  }
+
   const totalForLevel = userStats.totalXP + userStats.xpToNextLevel
   const levelProgress = totalForLevel > 0 ? (userStats.totalXP / totalForLevel) * 100 : 0
 

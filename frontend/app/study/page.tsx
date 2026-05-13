@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useRef, useEffect } from "react"
+import dynamic from "next/dynamic"
 import { Button } from "@/app/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/app/components/ui/card"
 import { Textarea } from "@/app/components/ui/textarea"
@@ -12,11 +13,10 @@ import { useRouter } from "next/navigation"
 import { useToast } from "@/app/components/ui/use-toast"
 import { useDropzone } from "react-dropzone"
 import { motion } from "framer-motion"
-import { Document, Page, pdfjs } from "react-pdf"
-import "react-pdf/dist/Page/AnnotationLayer.css"
-import "react-pdf/dist/Page/TextLayer.css"
-
-pdfjs.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`
+const StudyPdfPanel = dynamic(
+  () => import("./study-pdf-panel").then((mod) => ({ default: mod.StudyPdfPanel })),
+  { ssr: false, loading: () => <Loader2 className="animate-spin text-purple-400" /> }
+)
 
 interface ChatMessage {
   role: "user" | "assistant"
@@ -346,23 +346,25 @@ export default function StudyPage() {
               </CardHeader>
               <CardContent className="flex-1 overflow-y-auto">
                 {!document ? (
-                  <motion.div
+                  <div
                     {...getRootProps()}
                     className={`border-2 border-dashed rounded-lg p-12 text-center cursor-pointer transition-colors ${
                       isDragActive
                         ? "border-purple-500 bg-purple-900/20"
                         : "border-purple-700/40 hover:border-purple-500/60"
                     }`}
-                    animate={{
-                      scale: [1, 1.02, 1],
-                    }}
-                    transition={{
-                      duration: 3,
-                      repeat: Infinity,
-                      ease: "easeInOut"
-                    }}
                   >
                     <input {...getInputProps()} />
+                    <motion.div
+                      animate={{
+                        scale: [1, 1.02, 1],
+                      }}
+                      transition={{
+                        duration: 3,
+                        repeat: Infinity,
+                        ease: "easeInOut"
+                      }}
+                    >
                     <motion.div
                       animate={{
                         y: [0, -10, 0],
@@ -375,6 +377,7 @@ export default function StudyPage() {
                       }}
                     >
                       <Upload className="h-12 w-12 mx-auto mb-4 text-purple-400" />
+                    </motion.div>
                     </motion.div>
                     <motion.p 
                       className="text-lg mb-2"
@@ -401,7 +404,7 @@ export default function StudyPage() {
                         Select File
                       </Button>
                     </motion.div>
-                  </motion.div>
+                  </div>
                 ) : document.type === "application/pdf" ? (
                   <div ref={documentViewerRef} className="space-y-4">
                     <div className="flex items-center justify-between mb-4">
@@ -429,18 +432,11 @@ export default function StudyPage() {
                         </Button>
                       </div>
                     </div>
-                    <Document
+                    <StudyPdfPanel
                       file={document}
+                      pageNumber={pageNumber}
                       onLoadSuccess={onDocumentLoadSuccess}
-                      loading={<Loader2 className="animate-spin text-purple-400" />}
-                    >
-                      <Page
-                        pageNumber={pageNumber}
-                        renderTextLayer={true}
-                        renderAnnotationLayer={true}
-                        className="border border-purple-700/40 rounded"
-                      />
-                    </Document>
+                    />
                   </div>
                 ) : (
                   <div className="prose prose-invert max-w-none">

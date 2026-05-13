@@ -5,15 +5,58 @@ Runs as a background task every hour
 """
 import asyncio
 import logging
+import os
+import uuid
 from datetime import datetime, timedelta
 from typing import Dict, Any
-import os
 
-from service.database import get_database_service
-from service.s3_service import get_s3_service
 from pinecone import PineconeAsyncio
 
+from configs.config import config
+from service.database import get_database_service
+from service.redis_service import get_redis_service
+from service.s3_service import get_s3_service
+
 logger = logging.getLogger(__name__)
+
+CLEANUP_LOCK_KEY = "stud:cleanup:leader"
+CLEANUP_LOCK_TTL_SEC = 600
+_cleanup_worker_id = f"{os.getpid()}:{uuid.uuid4().hex[:8]}"
+
+
+async def _try_acquire_cleanup_leader() -> bool:
+    """
+    With Redis: only one Gunicorn worker runs cleanup per cycle (SET NX).
+    Without a reachable Redis client, return True so a single-node deploy still cleans up.
+    """
+    r = await get_redis_service()
+    await r._ensure_connected()
+    if not r.client:
+        return True
+    try:
+        acquired = await r.client.set(
+            CLEANUP_LOCK_KEY,
+            _cleanup_worker_id,
+            nx=True,
+            ex=CLEANUP_LOCK_TTL_SEC,
+        )
+        return bool(acquired)
+    except Exception as e:
+        logger.warning("Cleanup leader lock skipped: %s", e)
+        return True
+
+
+async def _release_cleanup_leader() -> None:
+    r = await get_redis_service()
+    await r._ensure_connected()
+    if not r.client:
+        return
+    try:
+        cur = await r.client.get(CLEANUP_LOCK_KEY)
+        if cur == _cleanup_worker_id:
+            await r.client.delete(CLEANUP_LOCK_KEY)
+    except Exception as e:
+        logger.debug("Cleanup leader release: %s", e)
 
 
 class CleanupService:
@@ -143,13 +186,28 @@ def get_cleanup_service() -> CleanupService:
 
 
 # Background task function
+_no_redis_lock_hint_logged = False
+
+
 async def run_cleanup_task():
     """Background task to run cleanup periodically"""
+    global _no_redis_lock_hint_logged
     cleanup_service = get_cleanup_service()
-    
+    if not os.getenv("REDIS_URL", "").strip():
+        if not _no_redis_lock_hint_logged:
+            logger.info(
+                "Cleanup scheduler: REDIS_URL not set in environment; "
+                "running without cross-worker lock (use Redis in multi-worker production)."
+            )
+            _no_redis_lock_hint_logged = True
+
     while True:
         try:
-            await cleanup_service.cleanup_expired_documents()
+            if await _try_acquire_cleanup_leader():
+                try:
+                    await cleanup_service.cleanup_expired_documents()
+                finally:
+                    await _release_cleanup_leader()
             await asyncio.sleep(3600)  # Run every hour
         except Exception as e:
             logger.error("Cleanup task error: %s", e)

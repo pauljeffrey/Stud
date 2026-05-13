@@ -28,7 +28,7 @@ class RedisService:
         """Ensure Redis connection is established (lazy, with sized pool)."""
         if not self._initialized and config.REDIS_URL:
             try:
-                max_conns = int(os.getenv("REDIS_MAX_CONNECTIONS", "100") or 100)
+                max_conns = int(os.getenv("REDIS_MAX_CONNECTIONS", "200") or 200)
                 self.client = await redis.from_url(
                     config.REDIS_URL,
                     decode_responses=True,

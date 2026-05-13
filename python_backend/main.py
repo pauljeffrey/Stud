@@ -9,11 +9,14 @@ import logging
 import os
 import sys
 import time
+import uuid
 from contextlib import asynccontextmanager
 from typing import List
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
 
 from api.auth import router as auth_router
 from api.cleanup import router as cleanup_router
@@ -32,9 +35,23 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _cors_strict() -> bool:
+    return os.getenv("PRODUCTION", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    ) or os.getenv("REQUIRE_EXPLICIT_CORS", "").lower() in ("1", "true", "yes")
+
+
 def _allowed_origins() -> List[str]:
     """Derive CORS origins. Defaults to '*' for dev; comma-separated env override for prod."""
     raw = os.getenv("ALLOWED_ORIGINS", "").strip()
+    if _cors_strict():
+        if not raw:
+            raise RuntimeError(
+                "ALLOWED_ORIGINS must be set (comma-separated) when PRODUCTION=1 or REQUIRE_EXPLICIT_CORS=1"
+            )
+        return [o.strip() for o in raw.split(",") if o.strip()]
     if not raw:
         return ["*"]
     return [o.strip() for o in raw.split(",") if o.strip()]
@@ -106,7 +123,8 @@ def _configure_thread_pool() -> None:
     """
     from concurrent.futures import ThreadPoolExecutor
 
-    workers = int(os.getenv("DB_THREAD_POOL_SIZE", "256") or 256)
+    # Prod default 512; override per worker if Supabase latency or pool limits demand it.
+    workers = int(os.getenv("DB_THREAD_POOL_SIZE", "512") or 512)
     loop = asyncio.get_running_loop()
     loop.set_default_executor(ThreadPoolExecutor(max_workers=workers))
     logger.info("Default thread executor sized for %s workers", workers)
@@ -130,6 +148,15 @@ async def lifespan(_app: FastAPI):
         logger.info("Stud AI Service shutting down")
 
 
+class RequestIdMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        rid = request.headers.get("x-request-id") or str(uuid.uuid4())
+        request.state.request_id = rid
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = rid
+        return response
+
+
 app = FastAPI(
     title="Stud AI Service",
     description="Backend API for the Stud medical education platform",
@@ -137,13 +164,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+_origins = _allowed_origins()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_allowed_origins(),
+    allow_origins=_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(RequestIdMiddleware)
 
 for router, tag in (
     (auth_router, "Authentication"),
@@ -191,4 +220,5 @@ async def health_check():
 
 if __name__ == "__main__":
     import uvicorn
+    # For production use: GUNICORN_WORKERS=4 ./start.sh — see start.sh / capacity-and-scaling.md
     uvicorn.run(app, host="0.0.0.0", port=8000)

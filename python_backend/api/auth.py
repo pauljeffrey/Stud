@@ -8,12 +8,13 @@ JWT/password helpers and user resolution live in `api.auth_deps`.
 """
 import asyncio
 import logging
+import os
 import secrets
 import uuid
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr, field_validator
 
 from api.auth_deps import (
@@ -24,6 +25,8 @@ from api.auth_deps import (
     invalidate_user_cache,
     verify_password,
 )
+from api.rate_limit import enforce_rate_limit
+from configs.config import config
 from service.database import get_database_service
 
 logger = logging.getLogger(__name__)
@@ -116,7 +119,8 @@ async def _create_session(client, user_id: str) -> str:
 # Routes
 # ============================================================
 @router.post("/auth/register")
-async def register(request: RegisterRequest):
+async def register(http_request: Request, request: RegisterRequest):
+    await enforce_rate_limit(http_request, "auth_register", config.RATE_LIMIT_PER_MINUTE, 60)
     db = get_database_service()
     client = db.client
     try:
@@ -193,7 +197,8 @@ async def register(request: RegisterRequest):
 
 
 @router.post("/auth/login")
-async def login(request: LoginRequest):
+async def login(http_request: Request, request: LoginRequest):
+    await enforce_rate_limit(http_request, "auth_login", config.RATE_LIMIT_PER_MINUTE, 60)
     db = get_database_service()
     client = db.client
     try:
@@ -256,6 +261,13 @@ async def get_current_user_info(current_user: dict = Depends(get_current_user)):
     return {"success": True, "user": _public_user(current_user)}
 
 
+@router.post("/auth/refresh")
+async def refresh_access_token(current_user: dict = Depends(get_current_user)):
+    """Issue a new JWT (sliding session). Client should replace the stored access token."""
+    token = create_jwt_token(current_user["id"], current_user["email"])
+    return {"success": True, "token": token}
+
+
 @router.post("/auth/password-reset")
 async def request_password_reset(request: PasswordResetRequest):
     db = get_database_service()
@@ -282,11 +294,13 @@ async def request_password_reset(request: PasswordResetRequest):
             .execute()
         )
         # TODO: send email with reset link in production.
-        return {
+        out: Dict[str, Any] = {
             "success": True,
             "message": "If email exists, reset link has been sent",
-            "token": reset_token,
         }
+        if os.getenv("EXPOSE_PASSWORD_RESET_TOKEN", "0").lower() in ("1", "true", "yes"):
+            out["token"] = reset_token
+        return out
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Password reset request failed: {e}")
@@ -328,6 +342,9 @@ async def confirm_password_reset(request: PasswordResetConfirm):
             )
             .eq("id", user["id"])
             .execute()
+        )
+        await asyncio.to_thread(
+            lambda: client.table("user_sessions").delete().eq("user_id", user["id"]).execute()
         )
         await invalidate_user_cache(user["id"])
 

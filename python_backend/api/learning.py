@@ -2,7 +2,7 @@
 Learning API endpoints
 Handles document upload, processing, and RAG-based chat
 """
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends, Query, Header
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends, Query, Header, Request
 from fastapi.responses import StreamingResponse
 from typing import Optional
 import hashlib
@@ -23,6 +23,9 @@ from api.auth_deps import (
     resolve_user_id,
     resolve_user_id_or_query,
 )
+from api.rate_limit import enforce_rate_limit
+from configs.config import config
+from http_constants import SSE_STREAM_HEADERS
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +83,7 @@ async def list_documents(user_id: str = Depends(get_current_user_id)):
 
 @router.post("/learning/upload")
 async def upload_document(
+    http_request: Request,
     file: UploadFile = File(...),
     document_id: Optional[str] = Form(None),
     user_id: Optional[str] = Form(None),
@@ -92,6 +96,9 @@ async def upload_document(
     file is idempotent.
     """
     try:
+        await enforce_rate_limit(
+            http_request, "learning_upload", config.RATE_LIMIT_PER_MINUTE, 60
+        )
         content = await file.read()
         file_name = file.filename or "untitled"
         uid = resolve_user_id(
@@ -226,7 +233,7 @@ async def learning_chat(
     return StreamingResponse(
         generate_learning_response(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
+        headers=dict(SSE_STREAM_HEADERS),
     )
 
 

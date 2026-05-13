@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server"
 import { PYTHON_BACKEND_URL } from "@/app/lib/proxy"
+import { sessionCookieSuffix } from "@/app/lib/session-cookie"
 
 const SESSION_COOKIE_MAX_AGE = 7 * 24 * 60 * 60 // 7 days
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
@@ -62,7 +63,7 @@ export async function POST(request: Request) {
     if (data.session_token) {
       headers.set(
         "Set-Cookie",
-        `session_token=${data.session_token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${SESSION_COOKIE_MAX_AGE}`
+        `session_token=${data.session_token}; ${sessionCookieSuffix(SESSION_COOKIE_MAX_AGE)}`
       )
     }
     return NextResponse.json(

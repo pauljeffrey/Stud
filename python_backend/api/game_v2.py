@@ -18,6 +18,7 @@ from agents.npc_agent import get_npc_agent
 from configs.config import config
 from service.database import get_database_service
 from service.redis_service import get_redis_service
+from http_constants import SSE_STREAM_HEADERS
 
 router = APIRouter()
 
@@ -365,7 +366,7 @@ async def game_master_chat(request: GameMasterChatRequest):
     return StreamingResponse(
         generate_response(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
+        headers=dict(SSE_STREAM_HEADERS),
     )
 
 
@@ -435,7 +436,7 @@ async def npc_chat(request: NPCChatRequest):
     return StreamingResponse(
         generate_response(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
+        headers=dict(SSE_STREAM_HEADERS),
     )
 
 
@@ -889,10 +890,23 @@ async def save_game(request: SaveGameRequest):
             "scenario_type": "standard",
             "created_at": datetime.now().isoformat(),
         }
-        await asyncio.gather(
-            _sb(lambda: supabase.table("game_states").insert(gs_payload).execute()),
-            _sb(lambda: supabase.table("game_creation_log").insert(creation_payload).execute()),
-        )
+
+        async def _upsert_and_log():
+            def _work():
+                supabase.table("game_states").upsert(gs_payload, on_conflict="id").execute()
+                existing = (
+                    supabase.table("game_creation_log")
+                    .select("id")
+                    .eq("game_state_id", game_state.game_id)
+                    .limit(1)
+                    .execute()
+                )
+                if not existing.data:
+                    supabase.table("game_creation_log").insert(creation_payload).execute()
+
+            return await _sb(_work)
+
+        await _upsert_and_log()
         
         # Cache in Redis
         redis_conn = await get_redis()

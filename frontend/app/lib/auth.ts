@@ -74,6 +74,27 @@ export function getAuthHeaders(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {}
 }
 
+async function refreshAccessToken(): Promise<boolean> {
+  const token = getToken()
+  if (!token) return false
+  try {
+    const res = await fetch("/api/auth/refresh", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    if (!res.ok) return false
+    const data = (await res.json().catch(() => null)) as { token?: string } | null
+    if (data?.token && typeof data.token === "string") {
+      localStorage.setItem(TOKEN_KEY, data.token)
+      emitAuthChange()
+      return true
+    }
+  } catch {
+    /* ignore */
+  }
+  return false
+}
+
 /**
  * Authenticated fetch. Attaches Bearer token and, on 401, clears local auth and
  * redirects to /auth/login (preserves the current path as `next`). Use this
@@ -83,12 +104,21 @@ export async function apiFetch(input: RequestInfo, init: RequestInit = {}): Prom
   const headers = new Headers(init.headers || {})
   const token = getToken()
   if (token && !headers.has("Authorization")) headers.set("Authorization", `Bearer ${token}`)
-  const res = await fetch(input, { ...init, headers })
+  let res = await fetch(input, { ...init, headers })
   if (res.status === 401 && typeof window !== "undefined") {
-    clearAuth()
-    const next = encodeURIComponent(window.location.pathname + window.location.search)
-    if (!window.location.pathname.startsWith("/auth/")) {
-      window.location.replace(`/auth/login?next=${next}`)
+    const ok = await refreshAccessToken()
+    if (ok) {
+      const h2 = new Headers(init.headers || {})
+      const t2 = getToken()
+      if (t2 && !h2.has("Authorization")) h2.set("Authorization", `Bearer ${t2}`)
+      res = await fetch(input, { ...init, headers: h2 })
+    }
+    if (res.status === 401) {
+      clearAuth()
+      const next = encodeURIComponent(window.location.pathname + window.location.search)
+      if (!window.location.pathname.startsWith("/auth/")) {
+        window.location.replace(`/auth/login?next=${next}`)
+      }
     }
   }
   return res

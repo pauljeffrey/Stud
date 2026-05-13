@@ -1,9 +1,7 @@
 "use client"
 
-"use client"
-
 import type React from "react"
-import { useState, useEffect } from "react"
+import { Suspense, useState, useEffect } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import Link from "next/link"
 import { Button } from "@/app/components/ui/button"
@@ -15,6 +13,20 @@ import { Loader2, Mail, ArrowLeft, CheckCircle2 } from "lucide-react"
 import { motion } from "framer-motion"
 
 export default function ForgotPasswordPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-screen bg-gradient-to-b from-black via-[#0A1128] to-[#4C1D95] flex items-center justify-center text-gray-300">
+          Loading…
+        </div>
+      }
+    >
+      <ForgotPasswordContent />
+    </Suspense>
+  )
+}
+
+function ForgotPasswordContent() {
   const [email, setEmail] = useState("")
   const [resetToken, setResetToken] = useState("")
   const [newPassword, setNewPassword] = useState("")

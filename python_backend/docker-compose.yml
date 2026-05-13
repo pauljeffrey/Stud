@@ -10,6 +10,10 @@ services:
       - .env
     environment:
       - PYTHONUNBUFFERED=1
+      # Production: uncomment and tune (each Uvicorn worker gets its own thread pool + Redis pool).
+      # - GUNICORN_WORKERS=4
+      # - DB_THREAD_POOL_SIZE=512
+      # - REDIS_MAX_CONNECTIONS=200
     volumes:
       # Mount code for hot-reload (development)
       - .:/app

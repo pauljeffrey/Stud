@@ -1,4 +1,7 @@
 import { NextResponse } from "next/server"
+import { sessionCookieSuffix } from "@/app/lib/session-cookie"
+
+const SESSION_MAX_AGE = 7 * 24 * 60 * 60
 
 /**
  * Login API Route Handler
@@ -47,7 +50,7 @@ export async function POST(request: Request) {
     if (data.session_token) {
       responseHeaders.set(
         "Set-Cookie",
-        `session_token=${data.session_token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${7 * 24 * 60 * 60}` // 7 days
+        `session_token=${data.session_token}; ${sessionCookieSuffix(SESSION_MAX_AGE)}`
       )
     }
 

@@ -7,7 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/app
 import { Input } from "@/app/components/ui/input"
 import { Label } from "@/app/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/app/components/ui/select"
-import { Checkbox } from "@/components/ui/checkbox"
+import { Checkbox } from "@/app/components/ui/checkbox"
 import { ArrowRight, Sparkles, AlertCircle } from "lucide-react"
 import { motion } from "framer-motion"
 import { useToast } from "@/app/components/ui/use-toast"

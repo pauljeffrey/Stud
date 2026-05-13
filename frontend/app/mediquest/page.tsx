@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useRef } from "react"
+import { Suspense, useState, useEffect, useRef } from "react"
 import { useSearchParams, useRouter } from "next/navigation"
 import { Button } from "@/app/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/app/components/ui/card"
@@ -81,6 +81,20 @@ interface GameState {
 }
 
 export default function MediquestPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-screen bg-black flex items-center justify-center text-gray-300">
+          Loading…
+        </div>
+      }
+    >
+      <MediquestPageContent />
+    </Suspense>
+  )
+}
+
+function MediquestPageContent() {
   const searchParams = useSearchParams()
   const router = useRouter()
   const { toast } = useToast()
