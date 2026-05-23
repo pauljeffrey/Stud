@@ -23,7 +23,7 @@ from pptx import Presentation
 from PIL import Image
 from io import BytesIO
 
-from configs import config
+from configs.config import config
 from service.database import get_database_service
 from service.document_heuristics import dedup_text_snippets, filter_by_relevance
 from service.s3_service import get_s3_service

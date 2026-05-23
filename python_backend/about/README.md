@@ -6,6 +6,8 @@ This directory contains comprehensive documentation about the Stud medical educa
 
 ### Core Documentation
 - **[core-features.md](./core-features.md)** - Overview of all core features and capabilities
+- **[capacity-and-scaling.md](./capacity-and-scaling.md)** - Single-server capacity and tuning
+- **[production-scaling-50k-dau.md](./production-scaling-50k-dau.md)** - 50k DAU, Redis, Supabase, infra and cost guide
 - **[README.md](./README.md)** - This file, providing an index to all documentation
 
 ### Workflow Documentation

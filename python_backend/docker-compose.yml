@@ -1,4 +1,18 @@
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: stud-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - stud-network
+
   backend:
     build:
       context: .
@@ -20,6 +34,9 @@ services:
       # Exclude node_modules and other large dirs
       - /app/__pycache__
     restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
     dns:
       - 8.8.8.8
       - 8.8.4.4
