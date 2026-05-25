@@ -1,0 +1,33 @@
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+    container_name: stud-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      # Server-side proxy to Python API (use service name when backend is on stud-network)
+      PYTHON_BACKEND_URL: ${PYTHON_BACKEND_URL:-http://host.docker.internal:8000}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+    env_file:
+      - path: .env.local
+        required: false
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://127.0.0.1:3000', (r) => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
