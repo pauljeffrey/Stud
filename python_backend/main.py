@@ -197,25 +197,8 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    try:
-        client = get_database_service().client
-        await asyncio.to_thread(
-            lambda: client.table("users").select("id").limit(1).execute()
-        )
-        return {
-            "status": "healthy",
-            "service": "Stud AI Service",
-            "database": "connected",
-            "version": "1.0.0",
-        }
-    except Exception as e:
-        logger.error("Health check failed: %s", e)
-        return {
-            "status": "unhealthy",
-            "service": "Stud AI Service",
-            "database": "disconnected",
-            "error": str(e),
-        }, 503
+    """Liveness probe for Docker/load balancers — no external dependency calls."""
+    return {"status": "healthy", "service": "Stud AI Service"}
 
 
 if __name__ == "__main__":
