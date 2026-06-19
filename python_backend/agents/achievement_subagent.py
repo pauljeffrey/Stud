@@ -14,6 +14,8 @@ from models.states import (
 )
 
 
+
+
 ACHIEVEMENT_SYSTEM_PROMPT = """You are an achievement designer for a clinical/medical/healthcare simulation game.
 Generate 0-4 achievements based on the user's performance and game progress.
 Achievements should feel earned, varied, and meaningful.
