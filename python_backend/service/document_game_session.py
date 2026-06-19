@@ -12,12 +12,33 @@ from service.redis_service import get_redis_service
 
 logger = logging.getLogger(__name__)
 
-_PREFIX = "doc_mq_sess"
+# Short prefix: was "doc_mq_sess"
+_PREFIX = "dms"
 _MEM: Dict[str, Dict[str, Any]] = {}
+
+# Short field names stored in Redis:
+#   did = document_id
+#   ogi = ordered_game_ids
+#   ci  = current_index
+#   md  = mode
+#   sg  = stages
+#   au  = artifact_uri
 
 
 def _redis_key(adventure_id: str) -> str:
     return f"{_PREFIX}:{adventure_id}"
+
+
+def _expand(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Expand short field names back to descriptive names for callers."""
+    return {
+        "document_id":       raw.get("did", raw.get("document_id")),
+        "ordered_game_ids":  raw.get("ogi", raw.get("ordered_game_ids")),
+        "current_index":     raw.get("ci",  raw.get("current_index")),
+        "mode":              raw.get("md",  raw.get("mode")),
+        "stages":            raw.get("sg",  raw.get("stages")),
+        "artifact_uri":      raw.get("au",  raw.get("artifact_uri")),
+    }
 
 
 async def load_mediquest_session(adventure_id: str) -> Optional[Dict[str, Any]]:
@@ -25,8 +46,9 @@ async def load_mediquest_session(adventure_id: str) -> Optional[Dict[str, Any]]:
     r = await get_redis_service()
     data = await r.get(k)
     if isinstance(data, dict):
-        return data
-    return _MEM.get(adventure_id)
+        return _expand(data)
+    mem = _MEM.get(adventure_id)
+    return _expand(mem) if mem else None
 
 
 async def save_mediquest_session(
@@ -40,12 +62,12 @@ async def save_mediquest_session(
     artifact_uri: Optional[str] = None,
 ) -> bool:
     payload: Dict[str, Any] = {
-        "document_id": document_id,
-        "ordered_game_ids": list(ordered_game_ids),
-        "current_index": int(current_index),
-        "mode": mode or {},
-        "stages": stages or [],
-        "artifact_uri": artifact_uri,
+        "did": document_id,
+        "ogi": list(ordered_game_ids),
+        "ci":  int(current_index),
+        "md":  mode or {},
+        "sg":  stages or [],
+        "au":  artifact_uri,
     }
     ttl = int(
         getattr(config, "DOCUMENT_GAME_JOB_REDIS_TTL", 7 * 24 * 3600) or 7 * 24 * 3600

@@ -68,6 +68,27 @@
 #   docker compose -f docker-compose.dokploy.yml up -d --build
 #
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: stud-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --save ""
+      --appendonly no
+      --tcp-backlog 128
+      --hz 20
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - default
+      - dokploy-network
+
   backend:
     image: mediquest-backend:latest
     pull_policy: build
@@ -75,6 +96,9 @@ services:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
     expose:
       - "8000"
     env_file:
@@ -84,6 +108,7 @@ services:
       GUNICORN_WORKERS: "4"
       PRODUCTION: "${PRODUCTION:-1}"
       ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:-}"
+      REDIS_URL: "${REDIS_URL:-redis://redis:6379}"
     healthcheck:
       test:
         [

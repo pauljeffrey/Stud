@@ -27,7 +27,7 @@ _local: Optional[asyncio.Queue] = None
 
 
 def _queue_name() -> str:
-    return getattr(config, "DOCUMENT_GAME_QUEUE_KEY", "jobs:document_game") or "jobs:document_game"
+    return getattr(config, "DOCUMENT_GAME_QUEUE_KEY", "q:dg") or "q:dg"
 
 
 def _dlq_name() -> str:
@@ -42,17 +42,21 @@ def _get_local() -> asyncio.Queue:
 
 
 def _normalize_job(raw: Dict[str, Any]) -> Dict[str, Any]:
-    """Support legacy messages that stored only {id, payload}."""
-    if isinstance(raw.get("payload"), dict):
+    """
+    Expand stored job to canonical form {id, payload, attempt}.
+    Handles both short field names (pl/at/er) and legacy long names (payload/attempt/error).
+    """
+    payload = raw.get("pl", raw.get("payload"))
+    if isinstance(payload, dict):
         return {
-            "id": raw.get("id") or f"dgj_{uuid.uuid4().hex[:16]}",
-            "payload": raw["payload"],
-            "attempt": int(raw.get("attempt") or 0),
+            "id":      raw.get("id") or f"dgj_{uuid.uuid4().hex[:16]}",
+            "payload": payload,
+            "attempt": int(raw.get("at", raw.get("attempt")) or 0),
         }
     return {
-        "id": raw.get("id") or f"dgj_{uuid.uuid4().hex[:16]}",
+        "id":      raw.get("id") or f"dgj_{uuid.uuid4().hex[:16]}",
         "payload": raw,
-        "attempt": int(raw.get("attempt") or 0),
+        "attempt": int(raw.get("at", raw.get("attempt")) or 0),
     }
 
 
@@ -61,7 +65,7 @@ async def enqueue_document_game_job(
     job_id: Optional[str] = None,
 ) -> str:
     job_id = job_id or f"dgj_{uuid.uuid4().hex[:16]}"
-    body = json.dumps({"id": job_id, "payload": payload, "attempt": 0}, default=str)
+    body = json.dumps({"id": job_id, "pl": payload, "at": 0}, default=str)
     if _USE_REDIS:
         r = await get_redis_service()
         await r._ensure_connected()
@@ -110,7 +114,7 @@ async def requeue_or_dead_letter(job: Dict[str, Any], error: str) -> None:
     job_id = norm.get("id")
     if attempt >= _JOB_MAX_ATTEMPTS:
         body = json.dumps(
-            {"id": job_id, "payload": payload, "attempt": attempt, "error": error},
+            {"id": job_id, "pl": payload, "at": attempt, "er": error},
             default=str,
         )
         if _USE_REDIS:
@@ -124,7 +128,7 @@ async def requeue_or_dead_letter(job: Dict[str, Any], error: str) -> None:
                     logger.warning("document_job_queue dlq rpush: %s", e)
         logger.error("document_game job dead-lettered (no Redis): id=%s err=%s", job_id, error)
         return
-    body = json.dumps({"id": job_id, "payload": payload, "attempt": attempt}, default=str)
+    body = json.dumps({"id": job_id, "pl": payload, "at": attempt}, default=str)
     if _USE_REDIS:
         r = await get_redis_service()
         await r._ensure_connected()

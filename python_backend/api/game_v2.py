@@ -181,7 +181,7 @@ async def initialize_game(request: InitializeGameRequest):
             try:
                 redis_conn = await get_redis()
                 if redis_conn:
-                    existing = await redis_conn.get(f"demo_game:{demo_session_id}")
+                    existing = await redis_conn.get(f"dg:{demo_session_id}")
                     if existing:
                         raise HTTPException(
                             status_code=400,
@@ -256,7 +256,7 @@ async def initialize_game(request: InitializeGameRequest):
             
             if request.is_demo:
                 await redis_service.set_with_ttl(
-                    f"demo_game:{demo_session_id}",
+                    f"dg:{demo_session_id}",
                     game_state.game_id,
                     3600
                 )
@@ -510,7 +510,7 @@ async def update_case_state(request: UpdateCaseStateRequest):
             redis_conn = await get_redis()
             if redis_conn:
                 await redis_conn.setex(
-                    f"game_state:{game_state.game_id}",
+                    f"gs:{game_state.game_id}",
                     3600,
                     json.dumps(game_state.model_dump(), default=str)
                 )
@@ -639,7 +639,7 @@ async def submit_answer(request: SubmitAnswerRequest):
             redis_conn = await get_redis()
             if redis_conn:
                 await redis_conn.setex(
-                    f"game_state:{game_state.game_id}",
+                    f"gs:{game_state.game_id}",
                     3600,
                     json.dumps(game_state.model_dump(), default=str)
                 )
@@ -734,7 +734,7 @@ async def get_game_state(game_id: str):
         try:
             redis_conn = await get_redis()
             if redis_conn:
-                cached = await redis_conn.get(f"game_state:{game_id}")
+                cached = await redis_conn.get(f"gs:{game_id}")
                 if cached:
                     return {"success": True, "game_state": json.loads(cached)}
         except Exception as e:
@@ -771,7 +771,7 @@ async def delete_game(game_id: str):
         try:
             redis_conn = await get_redis()
             if redis_conn:
-                await redis_conn.delete(f"game_state:{game_id}")
+                await redis_conn.delete(f"gs:{game_id}")
         except Exception as e:
             print(f"Redis delete error (non-critical): {e}")
         
@@ -912,7 +912,7 @@ async def save_game(request: SaveGameRequest):
         redis_conn = await get_redis()
         if redis_conn:
             await redis_conn.setex(
-                f"game_state:{game_state.game_id}",
+                f"gs:{game_state.game_id}",
                 3600,
                 json.dumps(game_state.model_dump(), default=str)
             )

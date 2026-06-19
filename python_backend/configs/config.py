@@ -95,7 +95,7 @@ class Config:
     DOCUMENT_GAME_JOB_REDIS_TTL = int(os.getenv("DOCUMENT_GAME_JOB_TTL", str(7 * 24 * 3600)))
     DOCUMENT_GAME_LLM_BUDGET_UNITS = int(os.getenv("DOCUMENT_GAME_LLM_BUDGET_UNITS", "500000"))  # soft cap per job
     # Optional: prefix Redis keys for job queue (worker drains in production)
-    DOCUMENT_GAME_QUEUE_KEY = os.getenv("DOCUMENT_GAME_QUEUE_KEY", "jobs:document_game")
+    DOCUMENT_GAME_QUEUE_KEY = os.getenv("DOCUMENT_GAME_QUEUE_KEY", "q:dg")
    
 
 config = Config()

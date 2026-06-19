@@ -19,7 +19,7 @@ from service.s3_service import get_s3_service
 
 logger = logging.getLogger(__name__)
 
-CLEANUP_LOCK_KEY = "stud:cleanup:leader"
+CLEANUP_LOCK_KEY = "cl:ldr"
 CLEANUP_LOCK_TTL_SEC = 600
 _cleanup_worker_id = f"{os.getpid()}:{uuid.uuid4().hex[:8]}"
 

@@ -12,6 +12,27 @@ from configs.config import config
 
 logger = logging.getLogger(__name__)
 
+# Key prefix constants — kept short to reduce per-key byte overhead.
+# Mapping: old prefix          → new prefix
+#   chat_session:              → cs:
+#   game_state:                → gs:
+#   game_session:              → gses:
+#   quiz_session:              → qses:
+#   quiz_progress:             → qp:
+#   doc_processing:            → dp:
+#   user_session:              → uses:
+#   user:profile:              → up:
+#   rate_limit:{key}           → {key}  (callers already prefix with "rl:")
+#   demo_game:                 → dg:    (used externally in game_v2.py)
+_K_CHAT  = "cs"
+_K_GS    = "gs"
+_K_GSES  = "gses"
+_K_QSES  = "qses"
+_K_QP    = "qp"
+_K_DP    = "dp"
+_K_USES  = "uses"
+_K_UP    = "up"
+
 
 class RedisService:
     """
@@ -58,23 +79,16 @@ class RedisService:
         session_id: str,
         chat_history: List[Dict[str, str]],
         document_id: Optional[str] = None,
-        ttl: int = 3600  # 1 hour default
+        ttl: int = 3600
     ) -> bool:
         """Store chat session"""
         await self._ensure_connected()
         if not self.client:
             return False
         
-        key = f"chat_session:{user_id}:{session_id}"
-        if document_id:
-            key = f"chat_session:{user_id}:{document_id}"
-        
+        key = f"{_K_CHAT}:{user_id}:{document_id if document_id else session_id}"
         try:
-            await self.client.setex(
-                key,
-                ttl,
-                json.dumps(chat_history)
-            )
+            await self.client.setex(key, ttl, json.dumps(chat_history))
             return True
         except Exception as e:
             logger.warning("Redis set_chat_session error: %s", e)
@@ -92,17 +106,15 @@ class RedisService:
             return None
         
         if document_id:
-            key = f"chat_session:{user_id}:{document_id}"
+            key = f"{_K_CHAT}:{user_id}:{document_id}"
         elif session_id:
-            key = f"chat_session:{user_id}:{session_id}"
+            key = f"{_K_CHAT}:{user_id}:{session_id}"
         else:
             return None
         
         try:
             data = await self.client.get(key)
-            if data:
-                return json.loads(data)
-            return None
+            return json.loads(data) if data else None
         except Exception as e:
             logger.warning("Redis get_chat_session error: %s", e)
             return None
@@ -139,9 +151,9 @@ class RedisService:
             return False
         
         if document_id:
-            key = f"chat_session:{user_id}:{document_id}"
+            key = f"{_K_CHAT}:{user_id}:{document_id}"
         elif session_id:
-            key = f"chat_session:{user_id}:{session_id}"
+            key = f"{_K_CHAT}:{user_id}:{session_id}"
         else:
             return False
         
@@ -160,17 +172,16 @@ class RedisService:
         self,
         game_id: str,
         game_state: Dict[str, Any],
-        ttl: int = 3600  # 1 hour default
+        ttl: int = 3600
     ) -> bool:
         """Cache game state"""
         await self._ensure_connected()
         if not self.client:
             return False
         
-        key = f"game_state:{game_id}"
         try:
             await self.client.setex(
-                key,
+                f"{_K_GS}:{game_id}",
                 ttl,
                 json.dumps(game_state, default=str)
             )
@@ -185,12 +196,9 @@ class RedisService:
         if not self.client:
             return None
         
-        key = f"game_state:{game_id}"
         try:
-            data = await self.client.get(key)
-            if data:
-                return json.loads(data)
-            return None
+            data = await self.client.get(f"{_K_GS}:{game_id}")
+            return json.loads(data) if data else None
         except Exception as e:
             logger.warning("Redis get_game_state error: %s", e)
             return None
@@ -212,9 +220,8 @@ class RedisService:
         if not self.client:
             return False
         
-        key = f"game_state:{game_id}"
         try:
-            await self.client.delete(key)
+            await self.client.delete(f"{_K_GS}:{game_id}")
             return True
         except Exception as e:
             logger.warning("Redis delete_game_state error: %s", e)
@@ -226,13 +233,12 @@ class RedisService:
         if not self.client:
             return []
         
-        pattern = f"game_state:*"
         try:
             keys = []
-            async for key in self.client.scan_iter(match=pattern):
-                game_data = await self.get_game_state(key.replace("game_state:", ""))
+            async for key in self.client.scan_iter(match=f"{_K_GS}:*"):
+                game_data = await self.get_game_state(key.replace(f"{_K_GS}:", ""))
                 if game_data and game_data.get("user_id") == user_id:
-                    keys.append(key.replace("game_state:", ""))
+                    keys.append(key.replace(f"{_K_GS}:", ""))
             return keys
         except Exception as e:
             logger.warning("Redis get_user_active_games error: %s", e)
@@ -240,6 +246,8 @@ class RedisService:
     
     # ============================================
     # COMPREHENSIVE STATE MANAGEMENT
+    # Stored as a single key instead of 5 to save key overhead.
+    # Internal storage uses short field names: gw, gs, cs, ns, pc
     # ============================================
     
     async def save_game_session_state(
@@ -253,51 +261,25 @@ class RedisService:
         previous_cases: Optional[Dict[str, Any]] = None,
         ttl: int = 3600
     ) -> bool:
-        """Save complete game session state to Redis"""
+        """Save complete game session state to Redis as a single key."""
         await self._ensure_connected()
         if not self.client:
             return False
         
         try:
-            # Save all components with user_id and session_id keys
-            base_key = f"game_session:{user_id}:{session_id}"
-            
-            # Save game world
+            payload = {
+                "gw": game_world,
+                "gs": game_state,
+                "cs": case_state,
+                "ns": npc_states,
+            }
+            if previous_cases is not None:
+                payload["pc"] = previous_cases
             await self.client.setex(
-                f"{base_key}:game_world",
+                f"{_K_GSES}:{user_id}:{session_id}",
                 ttl,
-                json.dumps(game_world, default=str)
+                json.dumps(payload, default=str)
             )
-            
-            # Save game state
-            await self.client.setex(
-                f"{base_key}:game_state",
-                ttl,
-                json.dumps(game_state, default=str)
-            )
-            
-            # Save case state
-            await self.client.setex(
-                f"{base_key}:case_state",
-                ttl,
-                json.dumps(case_state, default=str)
-            )
-            
-            # Save NPC states
-            await self.client.setex(
-                f"{base_key}:npc_states",
-                ttl,
-                json.dumps(npc_states, default=str)
-            )
-            
-            # Save previous cases if provided
-            if previous_cases:
-                await self.client.setex(
-                    f"{base_key}:previous_cases",
-                    ttl,
-                    json.dumps(previous_cases, default=str)
-                )
-            
             return True
         except Exception as e:
             logger.warning("Redis save_game_session_state error: %s", e)
@@ -308,29 +290,23 @@ class RedisService:
         user_id: str,
         session_id: str
     ) -> Optional[Dict[str, Any]]:
-        """Get complete game session state from Redis"""
+        """Get complete game session state from Redis."""
         await self._ensure_connected()
         if not self.client:
             return None
         
         try:
-            base_key = f"game_session:{user_id}:{session_id}"
-            
-            game_world_data = await self.client.get(f"{base_key}:game_world")
-            game_state_data = await self.client.get(f"{base_key}:game_state")
-            case_state_data = await self.client.get(f"{base_key}:case_state")
-            npc_states_data = await self.client.get(f"{base_key}:npc_states")
-            previous_cases_data = await self.client.get(f"{base_key}:previous_cases")
-            
-            if not all([game_world_data, game_state_data, case_state_data, npc_states_data]):
+            data = await self.client.get(f"{_K_GSES}:{user_id}:{session_id}")
+            if not data:
                 return None
-            
+            raw = json.loads(data)
+            # Expand short field names back to descriptive names for callers
             return {
-                "game_world": json.loads(game_world_data),
-                "game_state": json.loads(game_state_data),
-                "case_state": json.loads(case_state_data),
-                "npc_states": json.loads(npc_states_data),
-                "previous_cases": json.loads(previous_cases_data) if previous_cases_data else None
+                "game_world":      raw["gw"],
+                "game_state":      raw["gs"],
+                "case_state":      raw["cs"],
+                "npc_states":      raw["ns"],
+                "previous_cases":  raw.get("pc"),
             }
         except Exception as e:
             logger.warning("Redis get_game_session_state error: %s", e)
@@ -347,15 +323,7 @@ class RedisService:
             return False
         
         try:
-            base_key = f"game_session:{user_id}:{session_id}"
-            keys = [
-                f"{base_key}:game_world",
-                f"{base_key}:game_state",
-                f"{base_key}:case_state",
-                f"{base_key}:npc_states",
-                f"{base_key}:previous_cases"
-            ]
-            await self.client.delete(*keys)
+            await self.client.delete(f"{_K_GSES}:{user_id}:{session_id}")
             return True
         except Exception as e:
             logger.warning("Redis delete_game_session_state error: %s", e)
@@ -369,17 +337,16 @@ class RedisService:
         self,
         quiz_id: str,
         quiz_data: Dict[str, Any],
-        ttl: int = 1800  # 30 minutes default
+        ttl: int = 1800
     ) -> bool:
         """Cache quiz session"""
         await self._ensure_connected()
         if not self.client:
             return False
         
-        key = f"quiz_session:{quiz_id}"
         try:
             await self.client.setex(
-                key,
+                f"{_K_QSES}:{quiz_id}",
                 ttl,
                 json.dumps(quiz_data, default=str)
             )
@@ -394,12 +361,9 @@ class RedisService:
         if not self.client:
             return None
         
-        key = f"quiz_session:{quiz_id}"
         try:
-            data = await self.client.get(key)
-            if data:
-                return json.loads(data)
-            return None
+            data = await self.client.get(f"{_K_QSES}:{quiz_id}")
+            return json.loads(data) if data else None
         except Exception as e:
             logger.warning("Redis get_quiz_session error: %s", e)
             return None
@@ -413,21 +377,21 @@ class RedisService:
         time_remaining: int,
         ttl: int = 1800
     ) -> bool:
-        """Cache quiz progress"""
+        """Cache quiz progress. Stored with short field names to save memory."""
         await self._ensure_connected()
         if not self.client:
             return False
         
-        key = f"quiz_progress:{user_id}:{quiz_id}"
         try:
+            # Short field names: a=answers, cq=current_question, tr=time_remaining, ua=updated_at
             progress = {
-                "answers": answers,
-                "current_question": current_question,
-                "time_remaining": time_remaining,
-                "updated_at": str(datetime.now())
+                "a":  answers,
+                "cq": current_question,
+                "tr": time_remaining,
+                "ua": str(datetime.now()),
             }
             await self.client.setex(
-                key,
+                f"{_K_QP}:{user_id}:{quiz_id}",
                 ttl,
                 json.dumps(progress)
             )
@@ -441,17 +405,22 @@ class RedisService:
         user_id: str,
         quiz_id: str
     ) -> Optional[Dict[str, Any]]:
-        """Get quiz progress"""
+        """Get quiz progress. Expands short field names back to descriptive names."""
         await self._ensure_connected()
         if not self.client:
             return None
         
-        key = f"quiz_progress:{user_id}:{quiz_id}"
         try:
-            data = await self.client.get(key)
-            if data:
-                return json.loads(data)
-            return None
+            data = await self.client.get(f"{_K_QP}:{user_id}:{quiz_id}")
+            if not data:
+                return None
+            raw = json.loads(data)
+            return {
+                "answers":          raw.get("a",  raw.get("answers")),
+                "current_question": raw.get("cq", raw.get("current_question")),
+                "time_remaining":   raw.get("tr", raw.get("time_remaining")),
+                "updated_at":       raw.get("ua", raw.get("updated_at")),
+            }
         except Exception as e:
             logger.warning("Redis get_quiz_progress error: %s", e)
             return None
@@ -466,23 +435,23 @@ class RedisService:
         status: str,
         progress: float = 0.0,
         metadata: Optional[Dict[str, Any]] = None,
-        ttl: int = 7200  # 2 hours default
+        ttl: int = 7200
     ) -> bool:
-        """Cache document processing status"""
+        """Cache document processing status. Stored with short field names."""
         await self._ensure_connected()
         if not self.client:
             return False
         
-        key = f"doc_processing:{document_id}"
         try:
+            # Short field names: s=status, p=progress, m=metadata, ua=updated_at
             data = {
-                "status": status,
-                "progress": progress,
-                "metadata": metadata or {},
-                "updated_at": str(datetime.now())
+                "s":  status,
+                "p":  progress,
+                "m":  metadata or {},
+                "ua": str(datetime.now()),
             }
             await self.client.setex(
-                key,
+                f"{_K_DP}:{document_id}",
                 ttl,
                 json.dumps(data)
             )
@@ -492,17 +461,22 @@ class RedisService:
             return False
     
     async def get_document_processing(self, document_id: str) -> Optional[Dict[str, Any]]:
-        """Get document processing status"""
+        """Get document processing status. Expands short field names."""
         await self._ensure_connected()
         if not self.client:
             return None
         
-        key = f"doc_processing:{document_id}"
         try:
-            data = await self.client.get(key)
-            if data:
-                return json.loads(data)
-            return None
+            data = await self.client.get(f"{_K_DP}:{document_id}")
+            if not data:
+                return None
+            raw = json.loads(data)
+            return {
+                "status":     raw.get("s",  raw.get("status")),
+                "progress":   raw.get("p",  raw.get("progress")),
+                "metadata":   raw.get("m",  raw.get("metadata")),
+                "updated_at": raw.get("ua", raw.get("updated_at")),
+            }
         except Exception as e:
             logger.warning("Redis get_document_processing error: %s", e)
             return None
@@ -515,17 +489,16 @@ class RedisService:
         self,
         user_id: str,
         session_data: Dict[str, Any],
-        ttl: int = 86400  # 24 hours default
+        ttl: int = 86400
     ) -> bool:
         """Cache user session data"""
         await self._ensure_connected()
         if not self.client:
             return False
         
-        key = f"user_session:{user_id}"
         try:
             await self.client.setex(
-                key,
+                f"{_K_USES}:{user_id}",
                 ttl,
                 json.dumps(session_data, default=str)
             )
@@ -540,12 +513,9 @@ class RedisService:
         if not self.client:
             return None
         
-        key = f"user_session:{user_id}"
         try:
-            data = await self.client.get(key)
-            if data:
-                return json.loads(data)
-            return None
+            data = await self.client.get(f"{_K_USES}:{user_id}")
+            return json.loads(data) if data else None
         except Exception as e:
             logger.warning("Redis get_user_session error: %s", e)
             return None
@@ -558,28 +528,29 @@ class RedisService:
         self,
         key: str,
         limit: int,
-        window: int  # seconds
+        window: int
     ) -> tuple[bool, int]:
         """
-        Check rate limit
-        Returns (is_allowed, remaining_requests)
+        Check rate limit.
+        The key is stored as-is; callers are responsible for namespacing
+        (e.g. "rl:{bucket}:{ip}"). No extra prefix is added here.
+        Returns (is_allowed, remaining_requests).
         """
         await self._ensure_connected()
         if not self.client:
             return True, limit
         
-        rate_key = f"rate_limit:{key}"
         try:
-            current = await self.client.get(rate_key)
+            current = await self.client.get(key)
             if current is None:
-                await self.client.setex(rate_key, window, 1)
+                await self.client.setex(key, window, 1)
                 return True, limit - 1
             
             current_count = int(current)
             if current_count >= limit:
                 return False, 0
             
-            await self.client.incr(rate_key)
+            await self.client.incr(key)
             return True, limit - current_count - 1
         except Exception as e:
             logger.warning("Redis check_rate_limit error: %s", e)

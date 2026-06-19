@@ -124,7 +124,7 @@ async def get_current_user_id(
 
 async def get_current_user(user_id: str = Depends(get_current_user_id)) -> Dict[str, Any]:
     """Resolve full user row. Cached in Redis (short TTL) for high-concurrency reads."""
-    cache_key = f"user:profile:{user_id}"
+    cache_key = f"up:{user_id}"
 
     # Cache lookup (best-effort; never blocks on Redis failure)
     try:
@@ -156,6 +156,6 @@ async def invalidate_user_cache(user_id: str) -> None:
     try:
         from service.redis_service import get_redis_service
         redis_service = await get_redis_service()
-        await redis_service.delete(f"user:profile:{user_id}")
+        await redis_service.delete(f"up:{user_id}")
     except Exception as exc:
         logger.debug("user cache invalidate skipped: %s", exc)
