@@ -87,9 +87,7 @@ class CleanupService:
             # Find expired documents using database service
             expired_threshold = datetime.now() - timedelta(hours=2)
             
-            # Get all documents and filter expired ones
-            # Note: This is a simplified approach - in production, use a query with expiration filter
-            all_docs = await self.db_service.get_user_documents("", limit=1000)  # Get all docs (admin operation)
+            all_docs = await self.db_service.get_all_documents_admin(limit=1000)
             expired_docs = [
                 doc for doc in all_docs
                 if doc.get("pinecone_index_expires_at") and 

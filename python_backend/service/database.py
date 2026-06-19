@@ -430,6 +430,19 @@ class DatabaseService:
             return result.data or []
         return await asyncio.to_thread(_do)
 
+    async def get_all_documents_admin(self, limit: int = 1000) -> List[Dict[str, Any]]:
+        """Fetch all documents across all users — for background admin tasks only."""
+        def _do() -> List[Dict[str, Any]]:
+            result = (
+                self.client.table("documents")
+                .select("*")
+                .order("uploaded_at", desc=True)
+                .limit(limit)
+                .execute()
+            )
+            return result.data or []
+        return await asyncio.to_thread(_do)
+
     async def update_document(self, document_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
         def _do() -> Dict[str, Any]:
             result = self.client.table("documents").update(updates).eq("id", document_id).execute()
