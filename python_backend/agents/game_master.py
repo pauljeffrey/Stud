@@ -3,6 +3,7 @@ Refactored Game Master Agent for ClinicaQuest
 Responsible for generating clinical cases, managing achievements, and orchestrating game flow
 Handles 20-50 unique clinical cases per adventure
 """
+import logging
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any
 from pydantic_ai import Agent, RunContext
@@ -10,6 +11,8 @@ import os
 import json
 import uuid
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 try:
     from configs.config import Config
@@ -386,6 +389,9 @@ class GameMasterAgent:
         except Exception as e:
             raise Exception(f"Failed to generate first clinical case: {str(e)}")
 
+        if case_state is None:
+            raise Exception("Clinical case generation returned None — state_controller produced no output")
+
         if is_demo:
             case_state.max_clinical_changes = 3
         
@@ -483,9 +489,10 @@ class GameMasterAgent:
             previous_cases.current_difficulty_level = case_metadata.difficulty_level
             
             return case_state, previous_cases
-        
+
         except Exception as e:
-            return prev_case_state, previous_cases
+            logger.exception("_generate_clinical_case failed for case #%s", case_number)
+            raise
     
 
     async def update_game(
@@ -512,7 +519,7 @@ class GameMasterAgent:
         Previous cases: {len(previous_cases.cases)}; difficulty history: {[d.value for d in previous_difficulty_levels]}
         User performance: avg {avg_score:.1f}/10, {len(user_performance)} cases
         Achievements: {[a.title for a in achievements]}
-        Game config: {game_state.game_config.model_dump()}
+        Game config: {json.dumps(game_state.game_config.model_dump(mode="json"))}
         Current difficulty: {game_state.difficulty_level.value}
         Case {game_state.current_case_number} of {game_state.total_cases}
 
@@ -530,7 +537,7 @@ class GameMasterAgent:
                 if out.case_metadata:
                     game_state.case_metadata = out.case_metadata
         except Exception:
-            pass
+            logger.exception("update_game failed to parse agent output; game_state difficulty unchanged")
         game_state.game_world = updated_game_world
         game_state.last_updated = datetime.now()
         return game_state
@@ -658,7 +665,10 @@ class GameMasterAgent:
                 )
             except Exception as e:
                 raise Exception(f"Failed to generate next case: {str(e)}")
-            
+
+            if next_case is None:
+                raise Exception("Next case generation returned None — state_controller produced no output")
+
             game_state.case_state = next_case
             
             # Generate all NPCs at once
