@@ -18,7 +18,7 @@ const nextConfig = {
           // modern replacement and takes precedence in all current browsers.
           {
             key: "Content-Security-Policy",
-            value: "frame-ancestors *",
+            value: "frame-ancestors https://www.aletheia.com.ng",
           },
         ],
       },
