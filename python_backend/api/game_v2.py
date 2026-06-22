@@ -2,6 +2,7 @@
 Refactored Game API endpoints for Stud
 Integrates with new agent architecture and state models
 """
+import logging
 from fastapi import APIRouter, HTTPException, Depends, Header
 from fastapi.responses import StreamingResponse
 from typing import Optional, Dict, Any, List
@@ -10,6 +11,8 @@ import json
 import asyncio
 from datetime import datetime
 import uuid
+
+logger = logging.getLogger(__name__)
 
 from models.states import GameState, GameConfig, CaseState, PerformanceAnalysis, Achievement, UserDetails
 from agents.game_world_agent import get_game_world_agent
@@ -216,6 +219,7 @@ async def initialize_game(request: InitializeGameRequest):
                 provider=request.provider or "google"
             )
         except Exception as e:
+            logger.exception("Failed to initialize game master agent")
             raise HTTPException(status_code=500, detail=f"Failed to initialize game master agent: {str(e)}")
         
         # Get initial difficulty level (for demo mode)
@@ -237,6 +241,7 @@ async def initialize_game(request: InitializeGameRequest):
                 initial_difficulty=initial_difficulty
             )
         except Exception as e:
+            logger.exception("initialize_game agent call failed")
             raise HTTPException(status_code=500, detail=f"Failed to initialize game: {str(e)}")
         
         # Save complete session state to Redis
@@ -292,6 +297,7 @@ async def initialize_game(request: InitializeGameRequest):
                         difficulty_level=str(game_state.difficulty_level)
                     )
         except Exception as e:
+            logger.exception("Failed to save game state to Supabase")
             raise HTTPException(status_code=500, detail=f"Failed to save game state: {str(e)}")
         
         return {
