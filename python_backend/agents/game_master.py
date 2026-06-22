@@ -358,7 +358,7 @@ class GameMasterAgent:
             user_details_dict["user id"] = user_id
 
         result = await self.agent.run(f""" 
-                                Game world: {json.dumps(game_world)}
+                                Game world: {json.dumps(game_world.model_dump(mode="json"))}
                                 User details: {json.dumps(user_details_dict)}
                                 Generate a game state for the game given the above.
                                 """)
@@ -442,7 +442,7 @@ class GameMasterAgent:
         Generate clinical case #{case_number} for a medical education role-playing game.
         
         Game World Context:
-        {game_config.model_dump()}
+        {json.dumps(game_config.model_dump(mode="json"))}
         
         Game world description: {game_world.world_description}
         
