@@ -14,8 +14,8 @@ load_dotenv()
 
 MODEL_NAME = os.getenv("MODEL_NAME")
 API_KEY = os.getenv("MODEL_API_KEY")
-
-
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 def select_model(MODEL_NAME, API_KEY):
     """
@@ -29,13 +29,13 @@ def select_model(MODEL_NAME, API_KEY):
         tuple: (model, agent)
     """
     if not MODEL_NAME:
-        MODEL_NAME = "gemini-2.0-flash"  # Default fallback
+        MODEL_NAME = "gpt-5-nano"  # Default fallback
     
     MODEL_NAME_LOWER = MODEL_NAME.lower()
     
     if 'gemini' in MODEL_NAME_LOWER:
         model = GeminiModel(
-            MODEL_NAME, provider=GoogleGLAProvider(api_key=API_KEY)
+            MODEL_NAME, provider=GoogleGLAProvider(api_key=GOOGLE_API_KEY)
         )
     elif 'claude' in MODEL_NAME_LOWER:
         model = AnthropicModel(
@@ -43,14 +43,16 @@ def select_model(MODEL_NAME, API_KEY):
         )
     elif 'gpt' in MODEL_NAME_LOWER or 'openai' in MODEL_NAME_LOWER:
         model = OpenAIModel(
-            MODEL_NAME, provider=OpenAIProvider(api_key=API_KEY)
+            MODEL_NAME, provider=OpenAIProvider(api_key=OPENAI_API_KEY)
         )
     else:
-        # Default to Gemini if model type not recognized
-        model = GeminiModel(
-            MODEL_NAME or "gemini-2.0-flash", 
-            provider=GoogleGLAProvider(api_key=API_KEY)
-        )
+        OpenAIChatModel(
+                MODEL_NAME, 
+                provider=OpenAIProvider(
+                    base_url='https://integrate.api.nvidia.com/v1',
+                    api_key=API_KEY
+                )
+            )
     
     agent = Agent(model)
     
