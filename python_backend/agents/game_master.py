@@ -473,9 +473,7 @@ class GameMasterAgent:
         """
         
         try:
-            result = await self.state_controller.run(prompt)
-            # For now, result.output should be a dict-like object we can convert to CaseState
-            case_state = result.output
+            case_state = await self.state_controller.generate_case(prompt)
             
             # Add case to previous cases
             if previous_cases is None:
@@ -729,7 +727,7 @@ class GameMasterAgent:
                 updated.world_id = game_state.game_world.world_id
             return updated
         except Exception as e:
-            print(f"Failed to update game world: {e}")
+            logger.exception("_update_game_world failed; returning existing world unchanged")
             return game_state.game_world
     
     async def chat_with_game_master(

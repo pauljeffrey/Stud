@@ -5,6 +5,7 @@ Controls the degree of randomness and speed of escalation/de-escalation
 """
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from pydantic_ai import Agent, RunContext
@@ -13,6 +14,8 @@ import random
 
 from agents.agents import get_state_controller_model
 from models.states import CaseState, PerformanceAnalysis, StateChangeResponse, ClinicalCaseMetadata
+
+logger = logging.getLogger(__name__)
 
 
 def _state_controller_tool_fns(ctrl: "StateControllerAgent"):
@@ -94,6 +97,11 @@ class StateControllerAgent:
             output_type=CaseState,
             tools=_state_controller_tool_fns(self),
         )
+
+    async def generate_case(self, prompt: str) -> CaseState:
+        """Generate a brand-new clinical case from a prompt."""
+        result = await self.agent.run(prompt)
+        return result.output
 
     async def update_case_state(
         self,
@@ -206,7 +214,7 @@ class StateControllerAgent:
             elif case_metadata:
                 updated_case.case_metadata = case_metadata
         except Exception as e:
-            print(f"State controller agent failed: {e}")
+            logger.exception("State controller agent failed during update_case_state")
             updated_case = current_case_state.model_copy(deep=True)
             updated_case.n_changes = current_case_state.n_changes + 1
             updated_case.clue_used = clue_used or current_case_state.clue_used
