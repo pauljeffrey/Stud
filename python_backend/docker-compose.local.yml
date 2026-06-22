@@ -16,7 +16,7 @@ services:
   backend:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: dockerfile
     container_name: stud-backend
     ports:
       - "8000:8000"
@@ -24,14 +24,12 @@ services:
       - .env
     environment:
       - PYTHONUNBUFFERED=1
-      # Production: uncomment and tune (each Uvicorn worker gets its own thread pool + Redis pool).
-      # - GUNICORN_WORKERS=4
-      # - DB_THREAD_POOL_SIZE=512
-      # - REDIS_MAX_CONNECTIONS=200
+      # Override .env so start.sh picks start_server_dev() → uvicorn --reload
+      - GUNICORN_WORKERS=
     volumes:
-      # Mount code for hot-reload (development)
+      # Live-mount source code — uvicorn --reload watches /app for changes
       - .:/app
-      # Exclude node_modules and other large dirs
+      # Prevent the container's compiled cache from being overwritten by the mount
       - /app/__pycache__
     restart: unless-stopped
     depends_on:
@@ -50,6 +48,14 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+    # Docker Compose Watch: triggers a full image rebuild when dependencies change.
+    # Python file changes are handled by uvicorn --reload inside the container.
+    develop:
+      watch:
+        - action: rebuild
+          path: ./requirements.txt
+        - action: rebuild
+          path: ./dockerfile
     networks:
       - stud-network
 
