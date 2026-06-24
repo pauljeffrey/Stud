@@ -31,10 +31,19 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Get services
+# Services initialised lazily so a broken AI model config does not crash the
+# entire app (and auth) at startup — they are instantiated on first use.
 doc_processor = get_document_processor()
-tutor_agent = get_tutor_agent()
 db_service = get_database_service()
+
+_tutor_agent = None
+
+
+def _get_tutor_agent():
+    global _tutor_agent
+    if _tutor_agent is None:
+        _tutor_agent = get_tutor_agent()
+    return _tutor_agent
 
 
 @router.get("/learning/enrollments")
@@ -197,7 +206,7 @@ async def learning_chat(
                 document_id=document_id,
             )
 
-            response = await tutor_agent.chat(
+            response = await _get_tutor_agent().chat(
                 user_id=user_id,
                 user_message=request.message,
                 document_id=document_id,
@@ -406,7 +415,7 @@ async def generate_game_from_document(
             )
         )
 
-        state_payload = game_state.model_dump(mode="json", default=str)
+        state_payload = game_state.model_dump(mode="json")
         await save_mediquest_session(
             str(game_state.game_id),
             document_id=document_id,

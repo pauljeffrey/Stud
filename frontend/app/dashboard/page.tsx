@@ -99,12 +99,15 @@ interface RecentActivity {
   score?: number
 }
 
+const VALID_TABS = ["overview", "achievements", "analytics", "settings"] as const
+
 export default function DashboardPage() {
   const [userStats, setUserStats] = useState<UserStats | null>(null)
   const [recentGames, setRecentGames] = useState<RecentGame[]>([])
   const [recentQuizzes, setRecentQuizzes] = useState<RecentQuiz[]>([])
   const [recentActivities, setRecentActivities] = useState<RecentActivity[]>([])
   const [isLoading, setIsLoading] = useState(true)
+  const [activeTab, setActiveTab] = useState("overview")
   const [apiSettings, setApiSettings] = useState({
     modelName: "",
     apiKey: "",
@@ -114,6 +117,12 @@ export default function DashboardPage() {
 
   useEffect(() => {
     loadUserData(true)
+    // Honour ?tab= URL parameter so "View All" deep links work
+    const params = new URLSearchParams(window.location.search)
+    const tab = params.get("tab")
+    if (tab && (VALID_TABS as readonly string[]).includes(tab)) {
+      setActiveTab(tab)
+    }
   }, [])
 
   const loadUserData = async (isInitialLoad = true) => {
@@ -169,57 +178,18 @@ export default function DashboardPage() {
           })
         }
       } else {
-        // Fallback to mock data
+        // API error — show zeroed state so new users see a clean slate
         setUserStats({
-          totalQuests: 12,
-          completedQuests: 8,
-          totalQuizzes: 25,
-          averageScore: 85,
-          timeSpent: 1440,
-          currentLevel: 5,
-          experiencePoints: 2450,
-          totalXP: 2450,
-          xpToNextLevel: 550,
-          achievements: [
-            {
-              id: "1",
-              name: "First Steps",
-              description: "Complete your first quest",
-              icon: "🏃",
-              earned: true,
-              earnedAt: "2024-01-15",
-              rarity: "common",
-            },
-            {
-              id: "2",
-              name: "Quiz Master",
-              description: "Score 90% or higher on 5 quizzes",
-              icon: "🧠",
-              earned: true,
-              earnedAt: "2024-01-20",
-              rarity: "rare",
-            },
-            {
-              id: "3",
-              name: "Dedicated Learner",
-              description: "Study for 10 hours total",
-              icon: "📚",
-              earned: false,
-              rarity: "epic",
-              progress: 6,
-              maxProgress: 10,
-            },
-            {
-              id: "4",
-              name: "Game Champion",
-              description: "Complete 50 games",
-              icon: "🏆",
-              earned: false,
-              rarity: "legendary",
-              progress: 8,
-              maxProgress: 50,
-            },
-          ],
+          totalQuests: 0,
+          completedQuests: 0,
+          totalQuizzes: 0,
+          averageScore: 0,
+          timeSpent: 0,
+          currentLevel: 1,
+          experiencePoints: 0,
+          totalXP: 0,
+          xpToNextLevel: 1000,
+          achievements: [],
         })
       }
 
@@ -284,17 +254,16 @@ export default function DashboardPage() {
       }
     } catch (error) {
       console.error("Failed to load user data:", error)
-      // Use mock data on error
       setUserStats({
-        totalQuests: 12,
-        completedQuests: 8,
-        totalQuizzes: 25,
-        averageScore: 85,
-        timeSpent: 1440,
-        currentLevel: 5,
-        experiencePoints: 2450,
-        totalXP: 2450,
-        xpToNextLevel: 550,
+        totalQuests: 0,
+        completedQuests: 0,
+        totalQuizzes: 0,
+        averageScore: 0,
+        timeSpent: 0,
+        currentLevel: 1,
+        experiencePoints: 0,
+        totalXP: 0,
+        xpToNextLevel: 1000,
         achievements: [],
       })
     } finally {
@@ -488,7 +457,7 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        <Tabs defaultValue="overview" className="space-y-6">
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
           <TabsList className="bg-purple-800/80 backdrop-blur-sm text-white border border-purple-600">
             <TabsTrigger value="overview" className="data-[state=active]:bg-purple-600 data-[state=active]:text-white">
               <User className="h-4 w-4 mr-2" />
@@ -703,6 +672,7 @@ export default function DashboardPage() {
                   {recentActivities.length > 0 ? (
                     recentActivities.map((activity) => {
                       const Icon = activity.type === "game" ? Trophy : Brain
+                      const href = activity.type === "game" ? "/mediquest" : "/quiz"
                       const timeStr = activity.timestamp
                         ? new Date(activity.timestamp).toLocaleDateString(undefined, {
                             month: "short",
@@ -712,9 +682,10 @@ export default function DashboardPage() {
                           })
                         : "Recently"
                       return (
-                        <div
+                        <Link
                           key={activity.id}
-                          className="flex items-center gap-4 p-4 bg-purple-800/50 backdrop-blur-sm rounded-lg border border-purple-700 hover:border-purple-500 transition-all duration-300 transform hover:scale-[1.02]"
+                          href={href}
+                          className="flex items-center gap-4 p-4 bg-purple-800/50 backdrop-blur-sm rounded-lg border border-purple-700 hover:border-purple-500 transition-all duration-300 transform hover:scale-[1.02] cursor-pointer"
                         >
                           <Icon className="h-5 w-5 text-purple-400 flex-shrink-0" />
                           <div className="flex-1 min-w-0">
@@ -724,7 +695,7 @@ export default function DashboardPage() {
                               {timeStr}
                             </p>
                           </div>
-                        </div>
+                        </Link>
                       )
                     })
                   ) : (
@@ -810,15 +781,70 @@ export default function DashboardPage() {
           </TabsContent>
 
           <TabsContent value="analytics" className="space-y-6 animate-in fade-in duration-500">
-            <Link href="/analytics">
-              <Card className="bg-black/60 backdrop-blur-md border-purple-700/40 text-white hover:border-purple-500/60 transition-all cursor-pointer">
-                <CardContent className="p-6 text-center">
-                  <BarChart3 className="h-12 w-12 mx-auto mb-4 text-purple-400" />
-                  <h3 className="text-xl font-semibold mb-2">View Full Analytics</h3>
-                  <p className="text-gray-400">See detailed insights and performance metrics</p>
-                </CardContent>
-              </Card>
-            </Link>
+            <Card className="bg-black/60 backdrop-blur-md border-purple-700/40 text-white">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <BarChart3 className="h-5 w-5 text-purple-400" />
+                  Performance Analytics
+                </CardTitle>
+                <CardDescription className="text-gray-400">Your learning metrics at a glance</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-6">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="p-4 bg-purple-900/40 rounded-lg border border-purple-700/40">
+                    <p className="text-sm text-gray-400 mb-1">Quests Completed</p>
+                    <p className="text-3xl font-bold text-white">{userStats?.completedQuests ?? 0}</p>
+                    <p className="text-xs text-purple-300 mt-1">out of {userStats?.totalQuests ?? 0} total</p>
+                    <Progress
+                      value={userStats && userStats.totalQuests > 0 ? (userStats.completedQuests / userStats.totalQuests) * 100 : 0}
+                      className="mt-2 h-2"
+                    />
+                  </div>
+                  <div className="p-4 bg-purple-900/40 rounded-lg border border-purple-700/40">
+                    <p className="text-sm text-gray-400 mb-1">Quizzes Taken</p>
+                    <p className="text-3xl font-bold text-white">{userStats?.totalQuizzes ?? 0}</p>
+                    <p className="text-xs text-purple-300 mt-1">Average score: {userStats?.averageScore ?? 0}%</p>
+                    <Progress value={userStats?.averageScore ?? 0} className="mt-2 h-2" />
+                  </div>
+                  <div className="p-4 bg-purple-900/40 rounded-lg border border-purple-700/40">
+                    <p className="text-sm text-gray-400 mb-1">Total Study Time</p>
+                    <p className="text-3xl font-bold text-white">{Math.floor((userStats?.timeSpent ?? 0) / 60)}h {(userStats?.timeSpent ?? 0) % 60}m</p>
+                    <p className="text-xs text-purple-300 mt-1">Keep it up!</p>
+                  </div>
+                  <div className="p-4 bg-purple-900/40 rounded-lg border border-purple-700/40">
+                    <p className="text-sm text-gray-400 mb-1">Achievements Earned</p>
+                    <p className="text-3xl font-bold text-white">
+                      {userStats?.achievements?.filter((a) => a.earned).length ?? 0}
+                    </p>
+                    <p className="text-xs text-purple-300 mt-1">out of {userStats?.achievements?.length ?? 0} total</p>
+                    <Progress
+                      value={
+                        userStats && userStats.achievements?.length
+                          ? (userStats.achievements.filter((a) => a.earned).length / userStats.achievements.length) * 100
+                          : 0
+                      }
+                      className="mt-2 h-2"
+                    />
+                  </div>
+                </div>
+                <div className="p-4 bg-purple-900/40 rounded-lg border border-purple-700/40">
+                  <p className="text-sm text-gray-400 mb-2">Level Progress</p>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-white font-semibold">Level {userStats?.currentLevel ?? 1}</span>
+                    <span className="text-purple-300 text-sm">{userStats?.experiencePoints ?? 0} / {(userStats?.experiencePoints ?? 0) + (userStats?.xpToNextLevel ?? 1000)} XP</span>
+                  </div>
+                  <Progress
+                    value={
+                      userStats && userStats.xpToNextLevel > 0
+                        ? (userStats.experiencePoints / (userStats.experiencePoints + userStats.xpToNextLevel)) * 100
+                        : 0
+                    }
+                    className="h-3"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">{userStats?.xpToNextLevel ?? 1000} XP to next level</p>
+                </div>
+              </CardContent>
+            </Card>
           </TabsContent>
 
           <TabsContent value="settings" className="space-y-6 animate-in fade-in duration-500">
@@ -855,6 +881,8 @@ export default function DashboardPage() {
                     <Label htmlFor="modelName">Model Name</Label>
                     <Input
                       id="modelName"
+                      name="ai-model-name"
+                      autoComplete="off"
                       value={apiSettings.modelName}
                       onChange={(e) => setApiSettings((prev) => ({ ...prev, modelName: e.target.value }))}
                       placeholder="e.g., gemini-2.5-flash-preview-05-20"
@@ -866,7 +894,9 @@ export default function DashboardPage() {
                     <Label htmlFor="apiKey">API Key</Label>
                     <Input
                       id="apiKey"
+                      name="ai-api-key"
                       type="password"
+                      autoComplete="new-password"
                       value={apiSettings.apiKey}
                       onChange={(e) => setApiSettings((prev) => ({ ...prev, apiKey: e.target.value }))}
                       placeholder="Enter your API key"
@@ -912,7 +942,7 @@ export default function DashboardPage() {
                       Important Notes
                     </h4>
                     <ul className="text-sm text-gray-400 space-y-1">
-                      <li>• Your API key is stored securely in your browser</li>
+                      <li>• Your API key is encrypted and stored securely on the server</li>
                       <li>• If no API key is provided and USE_API_KEY=true, we'll use our default model</li>
                       <li>• If USE_API_KEY=false, you must provide an API key to use the platform</li>
                       <li>• Different models may have varying capabilities and costs</li>

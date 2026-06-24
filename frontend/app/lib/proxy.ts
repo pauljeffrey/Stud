@@ -42,13 +42,15 @@ export async function proxy(
   const upstream = await fetch(url, { method, headers, body })
 
   if (opts.stream) {
+    const headers = new Headers()
+    const contentType = upstream.headers.get("content-type")
+    headers.set("Content-Type", contentType || "text/event-stream")
+    headers.set("Cache-Control", "no-cache")
+    headers.set("Connection", "keep-alive")
+    headers.set("X-Accel-Buffering", "no")
     return new Response(upstream.body, {
       status: upstream.status,
-      headers: {
-        "Content-Type": "text/plain",
-        "Cache-Control": "no-cache",
-        Connection: "keep-alive",
-      },
+      headers,
     })
   }
 

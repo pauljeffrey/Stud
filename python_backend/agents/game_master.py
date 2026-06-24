@@ -68,6 +68,8 @@ def _case_to_dict(c: CaseState) -> str:
 
 def fetch_previous_cases(ctx: RunContext[ChatContext], n_chars: int=150) -> str:
     """Fetch list of previous cases in this game. n_chars is the number of characters to preview the scenario."""
+    if ctx.deps is None or not hasattr(ctx.deps, "game_state") or ctx.deps.game_state is None:
+        return "No previous cases in this game."
     gs = ctx.deps.game_state
     prev = getattr(gs, "previous_cases", None)
     if not prev or not prev.cases:
@@ -119,7 +121,16 @@ class GameMasterAgent:
         self.agent = Agent(
             model,
             system_prompt=self.game_master_system_prompt,
-            output_type=Union[GameState, GameStateUpdateOutput],  # Main output type, but individual methods may return other types
+            output_type=Union[GameState, GameStateUpdateOutput],
+            tools=[fetch_previous_cases]
+        )
+
+        # Dedicated init agent: GameState-only output avoids Union schema ambiguity
+        # and eliminates the 1-2 extra LLM retries that Union causes during initialization.
+        self.init_agent = Agent(
+            model,
+            system_prompt=self.game_master_system_prompt,
+            output_type=GameState,
             tools=[fetch_previous_cases]
         )
         
@@ -360,7 +371,7 @@ class GameMasterAgent:
         if "user id" not in user_details_dict:
             user_details_dict["user id"] = user_id
 
-        result = await self.agent.run(f""" 
+        result = await self.init_agent.run(f"""
                                 Game world: {json.dumps(game_world.model_dump(mode="json"))}
                                 User details: {json.dumps(user_details_dict)}
                                 Generate a game state for the game given the above.
@@ -369,12 +380,12 @@ class GameMasterAgent:
         game_state = result.output
         if is_demo:
             game_state.is_demo = True
-            game_state.total_cases = 3
+            game_state.total_cases = 6
             game_state.game_config = game_state.game_config.model_copy(update={
-                "total_cases": 3,
-                "max_clinical_changes": 3,
+                "total_cases": 6,
+                "max_clinical_changes": 6,
             })
-            game_state.demo_limits = {"total_cases": 3, "max_clinical_changes": 3}
+            game_state.demo_limits = {"total_cases": 6, "max_clinical_changes": 6}
 
         # Generate first clinical case
         try:
@@ -460,21 +471,38 @@ class GameMasterAgent:
         Do not reuse scenarios, diagnoses, or questions from the previous cases listed above.
         
         Case Requirements:
-        - Should cover aspects relevant to {game_config.profession} practice
-        - Can include: ethics, counseling, behavioral issues, communication challenges, clinical skills, difficult patients/relatives, difficult work colleagues etc.
-        - Difficulty level: {case_metadata.difficulty_level} (adjust complexity accordingly)
-        - Must be medically accurate and educational
-        - MUST be unique and different from previous cases
+        - Relevant to {game_config.profession} practice
+        - Difficulty: {case_metadata.difficulty_level}
+        - Medically accurate and educational
+        - MUST be unique vs previous cases
+        
+        BREVITY (strict):
+        - clinical_case_scenario_description: 3-5 concise sentences
+        - question: one clear question
+        - clue, reason_for_answer: 1-2 sentences each
+        - investigations / scan_images: only essential findings, brief
         
         {previous_cases_context}
         
-        Generate a complete clinical case state     
-        
+        Generate a complete clinical case state.
         """
         
         try:
             case_state = await self.state_controller.generate_case(prompt)
-            
+
+            # Some models omit case_metadata — back-fill from the prompt inputs
+            if case_state.case_metadata is None:
+                from models.states import ClinicalCaseMetadata
+                case_state.case_metadata = ClinicalCaseMetadata(
+                    case_number=case_number,
+                    profession=game_config.profession or "",
+                    clinical_setting=game_config.clinical_setting or "",
+                    subject=getattr(game_config, "subject", "") or "",
+                    subtopic="",
+                    diagnosis=case_state.diagnosis or "Unknown",
+                    difficulty_level=case_metadata.difficulty_level,
+                )
+
             # Add case to previous cases
             if previous_cases is None:
                 previous_cases = PreviousCases(

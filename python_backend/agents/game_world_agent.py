@@ -39,13 +39,12 @@ class GameWorldAgent:
         model = get_game_world_model_model(model_name, api_key)
         
         self.agent_system_prompt = """
-            You are the Game World Model for Stud. You create/update comprehensive, immersive game worlds
-            for medical education role-playing games based on configuration parameters.
+            You are the Game World Model for Stud. Create concise, immersive medical-education settings.
             
-            Generate/update detailed world descriptions that include:
-            - Rich, immersive world_description that sets the scene
-            - Appropriate hospital_name and department based on the setting/era
-            - Additional_context with relevant details about resources, staffing, demographics, etc.
+            BREVITY RULES (strict):
+            - world_description: 2-3 short sentences only (setting, mood, key constraint)
+            - hospital_name and department: brief labels
+            - additional_context: bullet-style facts, max 4 items, one line each
             """
         self.agent = Agent(
             model,
@@ -106,7 +105,7 @@ class GameWorldAgent:
         
         # Build prompt for world creation
         prompt = f"""
-        Create a comprehensive, immersive game world for a medical education role-playing game.
+        Create a concise world model for a medical education role-playing game.
         
         Configuration:
         - Profession: {game_config.profession}
@@ -117,21 +116,10 @@ class GameWorldAgent:
         - Nation Type: {game_config.nation_type}
         - Economic Advantage: {game_config.economic_advantage}
         
-        Create a detailed world model that includes:
-        1. A rich, immersive world_description that sets the scene
-        2. Appropriate hospital_name and department based on the setting. if its an era where a hospital or department is not applicable, use something similar that was used in that era.
-        3. Additional_context with relevant details about:
-           - Available medical equipment and resources (if applicable)
-           - Staffing levels and expertise
-           - Patient demographics
-           - Environmental factors
-           - Cultural and social context
-           - Economic constraints or advantages
-           - Nature of the Nation/country or community
-           - Historical medical practices (if applicable)
-        
-        Make the world feel alive, realistic, and educational. The world should provide context
-        for why certain medical decisions are made and what resources are available.
+        Keep output SHORT:
+        1. world_description — 2-3 sentences max
+        2. hospital_name and department — brief
+        3. additional_context — up to 4 one-line facts (resources, staffing, demographics, constraints)
         
         Generate a complete GameWorldModel with all fields filled.
         """

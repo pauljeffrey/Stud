@@ -6,6 +6,7 @@ gunicorn
 # Pydantic and AI
 pydantic
 pydantic-ai
+pydantic-ai-slim[openrouter]
 griffe
 
 # Database and Storage
@@ -29,10 +30,11 @@ python-docx
 python-pptx
 Pillow
 
-# Authentication
+# Authentication & Encryption
 bcrypt
 python-jose[cryptography]
 passlib[bcrypt]
+cryptography
 
 # AWS S3 (optional)
 boto3

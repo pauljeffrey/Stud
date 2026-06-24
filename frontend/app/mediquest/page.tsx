@@ -3,11 +3,10 @@
 import { Suspense, useState, useEffect, useRef } from "react"
 import { useSearchParams, useRouter } from "next/navigation"
 import { Button } from "@/app/components/ui/button"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/app/components/ui/card"
+import { Card, CardContent, CardHeader, CardTitle } from "@/app/components/ui/card"
 import { Textarea } from "@/app/components/ui/textarea"
 import { Badge } from "@/app/components/ui/badge"
 import { Input } from "@/app/components/ui/input"
-import { Label } from "@/app/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/app/components/ui/select"
 import {
   Collapsible,
@@ -21,64 +20,26 @@ import {
   ChevronDown,
   ChevronUp,
   Lightbulb,
-  Eye,
-  EyeOff,
   Users,
   Loader2,
-  Trophy,
-  AlertCircle,
   CheckCircle2,
-  XCircle,
+  X,
+  Activity,
+  Stethoscope,
 } from "lucide-react"
 import { useToast } from "@/app/components/ui/use-toast"
 import { motion, AnimatePresence } from "framer-motion"
 
-interface GameState {
-  game_id: string
-  user_id: string
-  game_world: {
-    world_description: string
-    hospital_name?: string
-    department?: string
-  }
-  case_state: {
-    case_state_id: string
-    clinical_case_scenario_description: string
-    question: string
-    diagnosis?: string
-    examination_findings: Record<string, any>
-    investigation_results: Record<string, any>
-    options?: string[]
-    answer?: string
-    reason_for_answer?: string
-    clue?: string
-    time_limit_seconds: number
-    time_remaining_seconds: number
-    n_changes: number
-    max_clinical_changes: number
-    clue_used: boolean
-  }
-  npc_states: Array<{
-    npc_id: string
-    name: string
-    role: string
-    personality_description: string
-  }>
-  current_case_number: number
-  total_cases: number
-  user_performance: Array<{
-    score: number
-    analysis: string
-    strengths: string[]
-    weaknesses: string[]
-  }>
-  achievements: Array<{
-    type: string
-    title: string
-    description: string
-  }>
-  game_master_chat_history: Array<{ role: string; content: string }>
-}
+import {
+  type GameState,
+  mergeBackendFromResponse,
+  mergeInitToBackend,
+  normalizeFromInitResponse,
+  normalizeGameState,
+  readApiError,
+  readSseStream,
+  toBackendPayload,
+} from "@/app/lib/game-state"
 
 export default function MediquestPage() {
   return (
@@ -108,14 +69,22 @@ function MediquestPageContent() {
   const [showAnswer, setShowAnswer] = useState(false)
   const [showClue, setShowClue] = useState(false)
   const [showReason, setShowReason] = useState(false)
-  const [showInvestigations, setShowInvestigations] = useState(false)
-  const [showExamination, setShowExamination] = useState(false)
-  const [gameMasterChatOpen, setGameMasterChatOpen] = useState(false)
-  const [npcChatOpen, setNpcChatOpen] = useState(false)
   const [selectedNpc, setSelectedNpc] = useState<string | null>(null)
   const [gameMasterMessage, setGameMasterMessage] = useState("")
   const [npcMessage, setNpcMessage] = useState("")
-  const [chatPosition, setChatPosition] = useState<"right" | "left">("right")
+  const [isGameMasterStreaming, setIsGameMasterStreaming] = useState(false)
+  const [npcChatHistory, setNpcChatHistory] = useState<
+    Record<string, Array<{ role: string; content: string }>>
+  >({})
+  const [worldOpen, setWorldOpen] = useState(true)
+  const [examOpen, setExamOpen] = useState(false)
+  const [investOpen, setInvestOpen] = useState(false)
+  const [scenarioOpen, setScenarioOpen] = useState(false)
+  const [showIntro, setShowIntro] = useState(false)
+  const backendStateRef = useRef<Record<string, unknown>>({})
+  const timeRemainingRef = useRef(0)
+  const timeUpHandledRef = useRef(false)
+  const introDismissedRef = useRef(false)
   const [modelConfig, setModelConfig] = useState({
     model_name: "",
     api_key: "",
@@ -160,8 +129,11 @@ function MediquestPageContent() {
     loadApiConfig()
   }, [])
 
-  const chatEndRef = useRef<HTMLDivElement>(null)
   const gameMasterChatEndRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    gameMasterChatEndRef.current?.scrollIntoView({ behavior: "smooth" })
+  }, [gameState?.game_master_chat_history, isGameMasterStreaming])
 
   useEffect(() => {
     if (gameId) {
@@ -171,35 +143,93 @@ function MediquestPageContent() {
     }
   }, [gameId])
 
-  useEffect(() => {
-    if (gameState?.case_state.time_remaining_seconds) {
-      setTimeRemaining(gameState.case_state.time_remaining_seconds)
-    }
-  }, [gameState])
+  const caseKey = gameState
+    ? `${gameState.game_id}:${gameState.case_state.case_state_id}`
+    : null
 
   useEffect(() => {
-    if (timeRemaining > 0) {
-      const timer = setInterval(() => {
-        setTimeRemaining((prev) => {
-          if (prev <= 1) {
-            handleTimeUp()
-            return 0
-          }
-          return prev - 1
+    if (!caseKey || !gameState) return
+    const initial = gameState.case_state.time_remaining_seconds
+    timeRemainingRef.current = initial
+    setTimeRemaining(initial)
+    timeUpHandledRef.current = false
+
+    const timer = setInterval(() => {
+      if (timeRemainingRef.current <= 0) return
+      timeRemainingRef.current -= 1
+      setTimeRemaining(timeRemainingRef.current)
+      if (timeRemainingRef.current <= 0 && !timeUpHandledRef.current) {
+        timeUpHandledRef.current = true
+        toast({
+          title: "Time's Up!",
+          description: "Please submit your answer",
+          variant: "destructive",
         })
-      }, 1000)
-      return () => clearInterval(timer)
+      }
+    }, 1000)
+
+    return () => clearInterval(timer)
+  }, [caseKey, toast])
+
+  const syncFromResponse = (raw: Record<string, unknown>, prev: GameState | null) => {
+    backendStateRef.current = mergeBackendFromResponse(backendStateRef.current, raw)
+    const next = normalizeGameState(raw, undefined, prev)
+    if (typeof raw.case_state === "object" && raw.case_state) {
+      const cs = raw.case_state as Record<string, unknown>
+      if (cs.time_remaining_seconds != null) {
+        timeRemainingRef.current = Number(cs.time_remaining_seconds)
+        setTimeRemaining(timeRemainingRef.current)
+      }
     }
-  }, [timeRemaining])
+    return next
+  }
+
+  const gamePayload = () =>
+    gameState ? toBackendPayload(backendStateRef.current, gameState) : null
+
+  const apiModelFields = () => {
+    const fields: Record<string, string> = { provider: modelConfig.provider }
+    if (modelConfig.model_name) fields.model_name = modelConfig.model_name
+    if (modelConfig.api_key) fields.api_key = modelConfig.api_key
+    return fields
+  }
+
+  useEffect(() => {
+    if (!caseKey) return
+    introDismissedRef.current = false
+    setShowIntro(true)
+    setScenarioOpen(false)
+  }, [caseKey])
+
+  const dismissIntro = () => {
+    if (introDismissedRef.current) return
+    introDismissedRef.current = true
+    setShowIntro(false)
+    setScenarioOpen(true)
+  }
 
   const loadGameState = async () => {
     try {
+      // Use cached init payload from demo page (avoids extra round-trip)
+      if (typeof window !== "undefined") {
+        const cached = sessionStorage.getItem(`game_init_${gameId}`)
+        if (cached) {
+          const data = JSON.parse(cached)
+          backendStateRef.current = mergeInitToBackend(data)
+          setGameState(normalizeFromInitResponse(data))
+          setLoading(false)
+          return
+        }
+      }
+
       const response = await fetch(`/api/game/${gameId}`)
       if (!response.ok) throw new Error("Failed to load game")
       const data = await response.json()
-      setGameState(data.game_state)
+      backendStateRef.current = (data.game_state ?? {}) as Record<string, unknown>
+      setGameState(normalizeGameState(data.game_state))
       setLoading(false)
     } catch (error) {
+      setLoading(false)
       toast({
         title: "Error",
         description: "Failed to load game state",
@@ -209,33 +239,26 @@ function MediquestPageContent() {
     }
   }
 
-  const handleTimeUp = () => {
-    toast({
-      title: "Time's Up!",
-      description: "Please submit your answer",
-      variant: "destructive"
-    })
-  }
-
   const handleUseClue = async () => {
     if (!gameState) return
+    const payload = gamePayload()
+    if (!payload) return
 
     try {
       const response = await fetch("/api/game/use-clue", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          game_state: gameState,
-          ...modelConfig
+          game_state: payload,
+          ...apiModelFields()
         })
       })
 
-      if (!response.ok) throw new Error("Failed to use clue")
+      if (!response.ok) throw new Error(await readApiError(response))
 
       const data = await response.json()
-      setGameState(data.game_state)
+      setGameState((prev) => syncFromResponse(data.game_state, prev))
       setShowClue(true)
-      setTimeRemaining(data.game_state.case_state.time_remaining_seconds)
 
       toast({
         title: "Clue Used",
@@ -245,7 +268,7 @@ function MediquestPageContent() {
     } catch (error) {
       toast({
         title: "Error",
-        description: "Failed to use clue",
+        description: error instanceof Error ? error.message : "Failed to use clue",
         variant: "destructive"
       })
     }
@@ -253,6 +276,8 @@ function MediquestPageContent() {
 
   const handleSubmitAnswer = async () => {
     if (!gameState) return
+    const payload = gamePayload()
+    if (!payload) return
 
     const answer = selectedOption || userAnswer
     if (!answer) {
@@ -270,17 +295,17 @@ function MediquestPageContent() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          game_state: gameState,
+          game_state: payload,
           answer,
           time_taken: timeTaken,
-          ...modelConfig
+          ...apiModelFields()
         })
       })
 
-      if (!response.ok) throw new Error("Failed to submit answer")
+      if (!response.ok) throw new Error(await readApiError(response))
 
       const data = await response.json()
-      setGameState(data.game_state)
+      setGameState((prev) => syncFromResponse(data.game_state, prev))
       setShowAnswer(true)
       setShowReason(true)
 
@@ -291,81 +316,91 @@ function MediquestPageContent() {
     } catch (error) {
       toast({
         title: "Error",
-        description: "Failed to submit answer",
+        description: error instanceof Error ? error.message : "Failed to submit answer",
         variant: "destructive"
       })
     }
   }
 
   const handleGameMasterChat = async () => {
-    if (!gameState || !gameMasterMessage.trim()) return
+    if (!gameState || !gameMasterMessage.trim() || isGameMasterStreaming) return
+    const payload = gamePayload()
+    if (!payload) return
 
     const userMessage = gameMasterMessage
     setGameMasterMessage("")
+    setIsGameMasterStreaming(true)
+    setGameState((prev) =>
+      prev
+        ? {
+            ...prev,
+            game_master_chat_history: [
+              ...(prev.game_master_chat_history ?? []),
+              { role: "user", content: userMessage },
+            ],
+          }
+        : prev
+    )
 
     try {
       const response = await fetch("/api/game/master-chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          game_state: gameState,
+          game_state: payload,
           user_message: userMessage,
-          ...modelConfig
+          ...apiModelFields()
         })
       })
 
-      if (!response.ok) throw new Error("Failed to send message")
+      if (!response.ok) throw new Error(await readApiError(response))
 
-      const reader = response.body?.getReader()
-      const decoder = new TextDecoder()
       let accumulatedResponse = ""
-
-      if (reader) {
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-
-          const chunk = decoder.decode(value)
-          const lines = chunk.split("\n")
-
-          for (const line of lines) {
-            if (line.startsWith("data: ")) {
-              const data = JSON.parse(line.slice(6))
-              accumulatedResponse += data.content
-
-              // Update chat history
-              setGameState((prev) => {
-                if (!prev) return prev
-                const newHistory = [...prev.game_master_chat_history]
-                if (newHistory[newHistory.length - 1]?.role !== "assistant") {
-                  newHistory.push({ role: "assistant", content: accumulatedResponse })
-                } else {
-                  newHistory[newHistory.length - 1].content = accumulatedResponse
-                }
-                return { ...prev, game_master_chat_history: newHistory }
-              })
-
-              if (data.complete && data.updated_game_state) {
-                setGameState(data.updated_game_state)
-              }
-            }
-          }
+      await readSseStream(response, (data) => {
+        if (data.error) throw new Error(String(data.error))
+        if (typeof data.content === "string") {
+          accumulatedResponse += data.content
         }
-      }
+
+        setGameState((prev) => {
+          if (!prev) return prev
+          const newHistory = [...(prev.game_master_chat_history ?? [])]
+          if (newHistory[newHistory.length - 1]?.role !== "assistant") {
+            newHistory.push({ role: "assistant", content: accumulatedResponse })
+          } else {
+            newHistory[newHistory.length - 1].content = accumulatedResponse
+          }
+          return { ...prev, game_master_chat_history: newHistory }
+        })
+
+        if (data.complete && data.updated_game_state) {
+          setGameState((prev) =>
+            syncFromResponse(data.updated_game_state as Record<string, unknown>, prev)
+          )
+        }
+      })
     } catch (error) {
       toast({
         title: "Error",
-        description: "Failed to send message",
+        description: error instanceof Error ? error.message : "Failed to send message",
         variant: "destructive"
       })
+    } finally {
+      setIsGameMasterStreaming(false)
     }
   }
 
   const handleNPCChat = async () => {
     if (!gameState || !selectedNpc || !npcMessage.trim()) return
+    const payload = gamePayload()
+    if (!payload) return
 
     const userMessage = npcMessage
     setNpcMessage("")
+    setNpcChatHistory((prev) => ({
+      ...prev,
+      [selectedNpc]: [...(prev[selectedNpc] ?? []), { role: "user", content: userMessage }],
+    }))
 
     try {
       const npc = gameState.npc_states.find(n => n.npc_id === selectedNpc)
@@ -375,45 +410,36 @@ function MediquestPageContent() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          game_state: gameState,
+          game_state: payload,
           npc_id: selectedNpc,
           user_message: userMessage,
-          chat_history: [],
-          ...modelConfig
+          chat_history: npcChatHistory[selectedNpc] ?? [],
+          ...apiModelFields()
         })
       })
 
-      if (!response.ok) throw new Error("Failed to send message")
+      if (!response.ok) throw new Error(await readApiError(response))
 
-      const reader = response.body?.getReader()
-      const decoder = new TextDecoder()
       let accumulatedResponse = ""
-
-      if (reader) {
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-
-          const chunk = decoder.decode(value)
-          const lines = chunk.split("\n")
-
-          for (const line of lines) {
-            if (line.startsWith("data: ")) {
-              const data = JSON.parse(line.slice(6))
-              accumulatedResponse += data.content
-            }
-          }
+      await readSseStream(response, (data) => {
+        if (data.error) throw new Error(String(data.error))
+        if (typeof data.content === "string") {
+          accumulatedResponse += data.content
         }
-      }
-
-      toast({
-        title: `${npc.name} responded`,
-        description: accumulatedResponse.substring(0, 100) + "...",
+        setNpcChatHistory((prev) => {
+          const history = [...(prev[selectedNpc] ?? [])]
+          if (history[history.length - 1]?.role !== "assistant") {
+            history.push({ role: "assistant", content: accumulatedResponse })
+          } else {
+            history[history.length - 1].content = accumulatedResponse
+          }
+          return { ...prev, [selectedNpc]: history }
+        })
       })
     } catch (error) {
       toast({
         title: "Error",
-        description: "Failed to send message",
+        description: error instanceof Error ? error.message : "Failed to send message",
         variant: "destructive"
       })
     }
@@ -437,468 +463,327 @@ function MediquestPageContent() {
     return null
   }
 
+  const panelClass =
+    "flex flex-col rounded-lg border border-purple-700/40 bg-black/60 backdrop-blur-md overflow-hidden min-h-0"
+  const examData = gameState.case_state.examination_findings ?? {}
+  const vitals =
+    (examData.vitals as Record<string, unknown>) ??
+    (examData.Vitals as Record<string, unknown>) ??
+    null
+
   return (
-    <div className="min-h-screen bg-gradient-to-b from-black via-[#0A1128] to-[#4C1D95] text-white p-4 relative overflow-hidden">
-      {/* Animated Background */}
+    <div className="h-screen overflow-hidden bg-gradient-to-b from-black via-[#0A1128] to-[#4C1D95] text-white p-2 relative">
       <div className="absolute inset-0 overflow-hidden pointer-events-none">
         <motion.div
-          className="absolute top-10 left-10 w-64 h-64 bg-purple-900/20 rounded-full blur-3xl"
-          animate={{
-            x: [0, 50, 0],
-            y: [0, 30, 0],
-            scale: [1, 1.2, 1],
-            rotate: [0, 90, 180, 360],
-          }}
-          transition={{
-            duration: 10,
-            repeat: Infinity,
-            ease: "easeInOut"
-          }}
+          className="absolute top-0 left-0 w-72 h-72 bg-purple-900/20 rounded-full blur-3xl"
+          animate={{ x: [0, 40, 0], y: [0, 20, 0], scale: [1, 1.15, 1] }}
+          transition={{ duration: 8, repeat: Infinity, ease: "easeInOut" }}
         />
         <motion.div
-          className="absolute bottom-10 right-10 w-80 h-80 bg-blue-900/20 rounded-full blur-3xl"
-          animate={{
-            x: [0, -50, 0],
-            y: [0, -30, 0],
-            scale: [1, 1.3, 1],
-            rotate: [360, 270, 180, 0],
-          }}
-          transition={{
-            duration: 12,
-            repeat: Infinity,
-            ease: "easeInOut"
-          }}
+          className="absolute bottom-0 right-0 w-96 h-96 bg-blue-900/20 rounded-full blur-3xl"
+          animate={{ x: [0, -40, 0], y: [0, -20, 0], scale: [1, 1.2, 1] }}
+          transition={{ duration: 10, repeat: Infinity, ease: "easeInOut" }}
         />
       </div>
-      <div className="container mx-auto grid grid-cols-1 lg:grid-cols-3 gap-4 h-[calc(100vh-2rem)] relative z-10">
-        {/* Left Column - Game World & Case Info */}
-        <div className="space-y-4 overflow-y-auto">
-          {/* Game World */}
+
+      <AnimatePresence>
+        {showIntro && (
           <motion.div
-            initial={{ opacity: 0, x: -20 }}
-            animate={{ opacity: 1, x: 0 }}
-            transition={{ duration: 0.5 }}
+            key="scenario-intro"
+            className="fixed inset-0 z-50 flex items-center justify-center p-4"
           >
-            <Card className="bg-black/60 backdrop-blur-md border-purple-700/40">
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Trophy className="h-5 w-5 text-purple-400" />
-                  Game World
+            <motion.div
+              className="absolute inset-0 bg-black/85"
+              initial={{ opacity: 1 }}
+              animate={{ opacity: 0 }}
+              transition={{ duration: 60, ease: "linear" }}
+              onAnimationComplete={() => {
+                if (!introDismissedRef.current) dismissIntro()
+              }}
+            />
+            <motion.div
+              initial={{ scale: 0.95, y: 12, opacity: 0 }}
+              animate={{ scale: 1, y: 0, opacity: 1 }}
+              className="relative max-w-2xl w-full rounded-xl border border-purple-500/50 bg-gradient-to-br from-purple-950/95 to-black/95 p-6 shadow-2xl"
+            >
+              <Button
+                size="icon"
+                variant="ghost"
+                className="absolute top-2 right-2 text-gray-300 hover:text-white"
+                onClick={dismissIntro}
+              >
+                <X className="h-4 w-4" />
+              </Button>
+              <Badge className="mb-3 bg-purple-700">Mission Briefing</Badge>
+              <h2 className="text-xl font-semibold mb-2">Enter the World</h2>
+              <p className="text-sm text-gray-300 mb-4">{gameState.game_world.world_description}</p>
+              <h3 className="text-sm font-medium text-purple-300 mb-1">Clinical Scenario</h3>
+              <p className="text-sm leading-relaxed">
+                {gameState.case_state.clinical_case_scenario_description}
+              </p>
+              <p className="text-xs text-gray-500 mt-4">Auto-continuing in 60 seconds…</p>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <div className="relative z-10 h-full flex flex-col gap-2">
+        <motion.div
+          className="flex items-center justify-between rounded-lg border border-purple-700/40 bg-black/60 px-3 py-2 backdrop-blur-md shrink-0"
+          animate={{ boxShadow: ["0 0 0 rgba(168,85,247,0)", "0 0 20px rgba(168,85,247,0.15)", "0 0 0 rgba(168,85,247,0)"] }}
+          transition={{ duration: 3, repeat: Infinity }}
+        >
+          <div className="flex items-center gap-2">
+            <Badge className="bg-purple-800 text-xs">
+              Case {gameState.current_case_number}/{gameState.total_cases}
+            </Badge>
+            {gameState.game_world.hospital_name && (
+              <span className="text-xs text-purple-200 hidden sm:inline">
+                {gameState.game_world.hospital_name}
+              </span>
+            )}
+          </div>
+          <motion.div
+            className="flex items-center gap-2 text-purple-300"
+            animate={timeRemaining <= 30 ? { scale: [1, 1.08, 1] } : {}}
+            transition={{ duration: 1, repeat: timeRemaining <= 30 ? Infinity : 0 }}
+          >
+            <Clock className="h-4 w-4" />
+            <span className="font-mono text-lg">{formatTime(timeRemaining)}</span>
+          </motion.div>
+        </motion.div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-2 flex-1 min-h-0">
+          {/* Section 1 — World & clinical data */}
+          <section className="flex flex-col gap-1.5 min-h-0 h-full">
+            <Collapsible open={worldOpen} onOpenChange={setWorldOpen} className={panelClass}>
+              <CollapsibleTrigger className="flex items-center justify-between px-3 py-2 text-sm font-medium hover:bg-purple-900/20">
+                <span className="flex items-center gap-2"><Activity className="h-4 w-4 text-purple-400" />World</span>
+                {worldOpen ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+              </CollapsibleTrigger>
+              <CollapsibleContent className="px-3 pb-2 text-xs text-gray-300 overflow-y-auto max-h-28">
+                {gameState.game_world.world_description}
+              </CollapsibleContent>
+            </Collapsible>
+
+            <Collapsible open={examOpen} onOpenChange={setExamOpen} className={`${panelClass} flex-1`}>
+              <CollapsibleTrigger className="flex items-center justify-between px-3 py-2 text-sm font-medium hover:bg-purple-900/20">
+                <span className="flex items-center gap-2"><Stethoscope className="h-4 w-4 text-purple-400" />Examination</span>
+                {examOpen ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+              </CollapsibleTrigger>
+              <CollapsibleContent className="px-3 pb-2 overflow-y-auto flex-1 min-h-0">
+                <pre className="text-[10px] text-gray-400 whitespace-pre-wrap">
+                  {JSON.stringify(examData, null, 2)}
+                </pre>
+              </CollapsibleContent>
+            </Collapsible>
+
+            <Collapsible open={investOpen} onOpenChange={setInvestOpen} className={`${panelClass} flex-1`}>
+              <CollapsibleTrigger className="flex items-center justify-between px-3 py-2 text-sm font-medium hover:bg-purple-900/20">
+                <span className="flex items-center gap-2"><Activity className="h-4 w-4 text-blue-400" />Vitals & Labs</span>
+                {investOpen ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+              </CollapsibleTrigger>
+              <CollapsibleContent className="px-3 pb-2 overflow-y-auto flex-1 min-h-0 space-y-2">
+                {vitals && (
+                  <pre className="text-[10px] text-amber-200/90 whitespace-pre-wrap">
+                    {JSON.stringify(vitals, null, 2)}
+                  </pre>
+                )}
+                <pre className="text-[10px] text-gray-400 whitespace-pre-wrap">
+                  {JSON.stringify(gameState.case_state.investigation_results, null, 2)}
+                </pre>
+              </CollapsibleContent>
+            </Collapsible>
+          </section>
+
+          {/* Section 2 — Scenario, question, actions, NPC */}
+          <section className="flex flex-col gap-1.5 min-h-0 h-full">
+            {!showIntro && (
+              <Collapsible open={scenarioOpen} onOpenChange={setScenarioOpen} className={panelClass}>
+                <CollapsibleTrigger className="flex items-center justify-between px-3 py-2 text-sm font-medium hover:bg-purple-900/20">
+                  <span>Clinical Scenario</span>
+                  {scenarioOpen ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                </CollapsibleTrigger>
+                <CollapsibleContent className="px-3 pb-2 text-xs overflow-y-auto max-h-20">
+                  {gameState.case_state.clinical_case_scenario_description}
+                </CollapsibleContent>
+              </Collapsible>
+            )}
+
+            <Card className={`${panelClass} shrink-0`}>
+              <CardHeader className="py-2 px-3">
+                <CardTitle className="text-sm">Question</CardTitle>
+              </CardHeader>
+              <CardContent className="px-3 pb-3 space-y-2">
+                <p className="text-sm font-medium">{gameState.case_state.question}</p>
+                {gameState.case_state.options ? (
+                  <div className="grid gap-1">
+                    {gameState.case_state.options.map((option, idx) => (
+                      <Button
+                        key={idx}
+                        size="sm"
+                        variant={selectedOption === option ? "default" : "outline"}
+                        className="h-8 justify-start text-left text-xs bg-black/50 border-purple-700/40"
+                        onClick={() => setSelectedOption(option)}
+                      >
+                        {String.fromCharCode(65 + idx)}. {option}
+                      </Button>
+                    ))}
+                  </div>
+                ) : (
+                  <Textarea
+                    placeholder="Your answer…"
+                    value={userAnswer}
+                    onChange={(e) => setUserAnswer(e.target.value)}
+                    className="bg-black/50 border-purple-700/40 min-h-[72px] text-sm"
+                  />
+                )}
+                <div className="flex gap-2">
+                  <Button
+                    size="sm"
+                    onClick={handleUseClue}
+                    disabled={showClue || gameState.case_state.clue_used}
+                    variant="outline"
+                    className="flex-1 h-8 text-xs border-purple-700/40"
+                  >
+                    <Lightbulb className="h-3 w-3 mr-1" />
+                    {gameState.case_state.clue_used ? "Clue Used" : "Use Clue"}
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={handleSubmitAnswer}
+                    className="flex-1 h-8 text-xs bg-purple-700 hover:bg-purple-800"
+                  >
+                    Submit
+                  </Button>
+                </div>
+                {showClue && gameState.case_state.clue && (
+                  <p className="text-xs text-purple-200 border border-purple-600/40 rounded p-2">
+                    <strong>Clue:</strong> {gameState.case_state.clue}
+                  </p>
+                )}
+                {showAnswer && gameState.case_state.answer && (
+                  <p className="text-xs text-green-200 border border-green-600/40 rounded p-2">
+                    <CheckCircle2 className="h-3 w-3 inline mr-1" />
+                    {gameState.case_state.answer}
+                  </p>
+                )}
+                {showReason && gameState.case_state.reason_for_answer && (
+                  <p className="text-xs text-blue-200 border border-blue-600/40 rounded p-2">
+                    {gameState.case_state.reason_for_answer}
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card className={`${panelClass} flex-1`}>
+              <CardHeader className="py-2 px-3">
+                <CardTitle className="text-sm flex items-center gap-2">
+                  <Users className="h-4 w-4" /> NPC Chat
                 </CardTitle>
               </CardHeader>
-              <CardContent>
-                <p className="text-sm text-gray-300">{gameState.game_world.world_description}</p>
-                {gameState.game_world.hospital_name && (
-                  <Badge className="mt-2 bg-purple-700">{gameState.game_world.hospital_name}</Badge>
-                )}
-              </CardContent>
-            </Card>
-          </motion.div>
-
-          {/* Case Scenario */}
-          <Card className="bg-black/60 backdrop-blur-md border-purple-700/40">
-            <CardHeader>
-              <CardTitle>Case Scenario</CardTitle>
-              <CardDescription className="text-gray-400">
-                Case {gameState.current_case_number}/{gameState.total_cases}
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <p className="text-sm">{gameState.case_state.clinical_case_scenario_description}</p>
-            </CardContent>
-          </Card>
-
-          {/* Examination Findings - Collapsible */}
-          <Collapsible open={showExamination} onOpenChange={setShowExamination}>
-            <Card className="bg-black/60 backdrop-blur-md border-purple-700/40">
-              <CollapsibleTrigger className="w-full">
-                <CardHeader className="flex flex-row items-center justify-between">
-                  <CardTitle>Examination Findings</CardTitle>
-                  {showExamination ? <ChevronUp /> : <ChevronDown />}
-                </CardHeader>
-              </CollapsibleTrigger>
-              <CollapsibleContent>
-                <CardContent>
-                  <pre className="text-xs text-gray-300 whitespace-pre-wrap">
-                    {JSON.stringify(gameState.case_state.examination_findings, null, 2)}
-                  </pre>
-                </CardContent>
-              </CollapsibleContent>
-            </Card>
-          </Collapsible>
-
-          {/* Investigation Results - Collapsible */}
-          <Collapsible open={showInvestigations} onOpenChange={setShowInvestigations}>
-            <Card className="bg-black/60 backdrop-blur-md border-purple-700/40">
-              <CollapsibleTrigger className="w-full">
-                <CardHeader className="flex flex-row items-center justify-between">
-                  <CardTitle>Investigation Results</CardTitle>
-                  {showInvestigations ? <ChevronUp /> : <ChevronDown />}
-                </CardHeader>
-              </CollapsibleTrigger>
-              <CollapsibleContent>
-                <CardContent>
-                  <pre className="text-xs text-gray-300 whitespace-pre-wrap">
-                    {JSON.stringify(gameState.case_state.investigation_results, null, 2)}
-                  </pre>
-                </CardContent>
-              </CollapsibleContent>
-            </Card>
-          </Collapsible>
-
-          {/* Achievements */}
-          {gameState.achievements.length > 0 ? (
-            <Card className="bg-black/60 backdrop-blur-md border-purple-700/40">
-              <CardHeader>
-                <CardTitle>Achievements</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-2">
-                {gameState.achievements.map((achievement, idx) => (
-                  <Badge key={idx} className="bg-purple-700">
-                    {achievement.title}
-                  </Badge>
-                ))}
-              </CardContent>
-            </Card>
-          ) : null}
-        </div>
-
-        {/* Center Column - Question & Answer */}
-        <div className="space-y-4 overflow-y-auto">
-          {/* Timer & Question */}
-          <Card className="bg-black/60 backdrop-blur-md border-purple-700/40">
-            <CardHeader>
-              <div className="flex items-center justify-between">
-                <CardTitle>Question</CardTitle>
-                <motion.div 
-                  className="flex items-center gap-2 text-purple-400"
-                  animate={{
-                    scale: [1, 1.1, 1],
-                  }}
-                  transition={{
-                    duration: 2,
-                    repeat: Infinity,
-                    ease: "easeInOut"
-                  }}
-                >
-                  <Clock className="h-5 w-5" />
-                  <span className="font-mono text-lg">{formatTime(timeRemaining)}</span>
-                </motion.div>
-              </div>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <p className="text-lg">{gameState.case_state.question}</p>
-
-              {/* Multiple Choice Options */}
-              {gameState.case_state.options && (
-                <div className="space-y-2">
-                  {gameState.case_state.options.map((option, idx) => (
-                    <Button
-                      key={idx}
-                      variant={selectedOption === option ? "default" : "outline"}
-                      className="w-full justify-start text-left bg-black/50 border-purple-700/40 hover:bg-purple-700/30"
-                      onClick={() => setSelectedOption(option)}
-                    >
-                      {String.fromCharCode(65 + idx)}. {option}
-                    </Button>
-                  ))}
-                </div>
-              )}
-
-              {/* Open-ended Answer */}
-              {!gameState.case_state.options && (
-                <Textarea
-                  placeholder="Type your answer here..."
-                  value={userAnswer}
-                  onChange={(e) => setUserAnswer(e.target.value)}
-                  className="bg-black/50 border-purple-700/40 min-h-[150px]"
-                />
-              )}
-
-              {/* Action Buttons */}
-              <div className="flex gap-2">
-                <Button
-                  onClick={handleUseClue}
-                  disabled={showClue || gameState.case_state.clue_used}
-                  variant="outline"
-                  className="flex-1 border-purple-700/40 hover:bg-purple-700/30"
-                >
-                  <Lightbulb className="h-4 w-4 mr-2" />
-                  {gameState.case_state.clue_used ? "Clue Used" : "Use Clue"}
-                </Button>
-                <motion.div
-                  whileHover={{ scale: 1.05 }}
-                  whileTap={{ scale: 0.95 }}
-                  className="flex-1"
-                >
-                  <Button
-                    onClick={handleSubmitAnswer}
-                    className="w-full bg-gradient-to-r from-purple-700 to-purple-900 hover:from-purple-800 hover:to-purple-950"
-                  >
-                    Submit Answer
-                  </Button>
-                </motion.div>
-              </div>
-
-              {/* Clue (Hidden by default) */}
-              <AnimatePresence>
-                {showClue && gameState.case_state.clue && (
-                  <motion.div
-                    initial={{ opacity: 0, height: 0 }}
-                    animate={{ opacity: 1, height: "auto" }}
-                    exit={{ opacity: 0, height: 0 }}
-                    className="bg-purple-900/30 border border-purple-500/50 rounded-lg p-4"
-                  >
-                    <motion.p 
-                      className="text-sm"
-                      animate={{
-                        scale: [1, 1.02, 1],
-                      }}
-                      transition={{
-                        duration: 2,
-                        repeat: Infinity,
-                        ease: "easeInOut"
-                      }}
-                    >
-                      <strong>Clue:</strong> {gameState.case_state.clue}
-                    </motion.p>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-
-              {/* Answer (Hidden by default) */}
-              <AnimatePresence>
-                {showAnswer && gameState.case_state.answer && (
-                  <motion.div
-                    initial={{ opacity: 0, height: 0 }}
-                    animate={{ opacity: 1, height: "auto" }}
-                    exit={{ opacity: 0, height: 0 }}
-                    className="bg-green-900/30 border border-green-500/50 rounded-lg p-4"
-                  >
-                    <div className="flex items-center gap-2 mb-2">
-                      <CheckCircle2 className="h-5 w-5 text-purple-400" />
-                      <strong>Correct Answer:</strong>
-                    </div>
-                    <p className="text-sm">{gameState.case_state.answer}</p>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-
-              {/* Reason for Answer (Hidden by default) */}
-              <AnimatePresence>
-                {showReason && gameState.case_state.reason_for_answer && (
-                  <motion.div
-                    initial={{ opacity: 0, height: 0 }}
-                    animate={{ opacity: 1, height: "auto" }}
-                    exit={{ opacity: 0, height: 0 }}
-                    className="bg-blue-900/30 border border-blue-400/50 rounded-lg p-4"
-                  >
-                    <motion.div 
-                      className="flex items-center gap-2 mb-2"
-                      animate={{
-                        scale: [1, 1.05, 1],
-                      }}
-                      transition={{
-                        duration: 2,
-                        repeat: Infinity,
-                        ease: "easeInOut"
-                      }}
-                    >
-                      <motion.div
-                        animate={{
-                          rotate: [0, -15, 15, 0],
-                        }}
-                        transition={{
-                          duration: 2,
-                          repeat: Infinity,
-                          ease: "easeInOut"
-                        }}
+              <CardContent className="px-3 pb-3 flex flex-col flex-1 min-h-0 gap-2">
+                <Select value={selectedNpc || ""} onValueChange={setSelectedNpc}>
+                  <SelectTrigger className="h-8 bg-black/50 border-purple-700/40 text-xs">
+                    <SelectValue placeholder="Select NPC" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {gameState.npc_states.map((npc) => (
+                      <SelectItem key={npc.npc_id} value={npc.npc_id}>
+                        {npc.name} ({npc.role})
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <div className="flex-1 min-h-0 overflow-y-auto rounded bg-black/30 p-2 space-y-1">
+                  {selectedNpc ? (
+                    (npcChatHistory[selectedNpc] ?? []).map((msg, idx) => (
+                      <div
+                        key={idx}
+                        className={`text-xs p-1.5 rounded ${
+                          msg.role === "user" ? "bg-purple-700/30 ml-2" : "bg-blue-800/30 mr-2"
+                        }`}
                       >
-                        <AlertCircle className="h-5 w-5 text-blue-300" />
-                      </motion.div>
-                      <strong>Explanation:</strong>
-                    </motion.div>
-                    <motion.p 
-                      className="text-sm"
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      transition={{ delay: 0.2 }}
-                    >
-                      {gameState.case_state.reason_for_answer}
-                    </motion.p>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </CardContent>
-          </Card>
-
-          {/* Performance Summary */}
-          {gameState.user_performance.length > 0 && (
-            <Card className="bg-black/60 backdrop-blur-md border-purple-700/40">
-              <CardHeader>
-                <CardTitle>Performance</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-2">
-                {gameState.user_performance.map((perf, idx) => (
-                  <div key={idx} className="border-b border-purple-700/40 pb-2">
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-sm">Case {idx + 1}</span>
-                      <Badge className={perf.score >= 7 ? "bg-purple-700" : perf.score >= 5 ? "bg-purple-600" : "bg-purple-800"}>
-                        {perf.score}/10
-                      </Badge>
-                    </div>
-                    <p className="text-xs text-gray-400">{perf.analysis}</p>
-                  </div>
-                ))}
+                        {msg.content}
+                      </div>
+                    ))
+                  ) : (
+                    <p className="text-xs text-gray-500">Select an NPC to chat</p>
+                  )}
+                </div>
+                <div className="flex gap-1 shrink-0">
+                  <Input
+                    value={npcMessage}
+                    onChange={(e) => setNpcMessage(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && handleNPCChat()}
+                    placeholder="Ask NPC…"
+                    disabled={!selectedNpc}
+                    className="h-8 text-xs bg-black/50 border-purple-700/40"
+                  />
+                  <Button size="icon" className="h-8 w-8 shrink-0" onClick={handleNPCChat} disabled={!selectedNpc}>
+                    <Send className="h-3 w-3" />
+                  </Button>
+                </div>
               </CardContent>
             </Card>
-          )}
-        </div>
+          </section>
 
-        {/* Right Column - Chat Windows */}
-        <div className={`space-y-4 overflow-y-auto ${chatPosition === "left" ? "lg:order-first" : ""}`}>
-          {/* Chat Position Toggle */}
-          <Button
-            onClick={() => setChatPosition(chatPosition === "right" ? "left" : "right")}
-            variant="outline"
-            size="sm"
-            className="w-full border-purple-700/40"
-          >
-            Move Chat {chatPosition === "right" ? "Left" : "Right"}
-          </Button>
-
-          {/* Game Master Chat */}
-          <Card className="bg-black/60 backdrop-blur-md border-purple-700/40">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <MessageCircle className="h-5 w-5" />
-                Game Master
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="h-64 overflow-y-auto space-y-2">
-                {gameState.game_master_chat_history.map((msg, idx) => (
-                  <motion.div
-                    key={idx}
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: idx * 0.1 }}
-                    className={`p-2 rounded-lg ${
-                      msg.role === "user" ? "bg-purple-700/30 ml-4" : "bg-blue-800/30 mr-4"
-                    }`}
-                  >
-                    <motion.p 
-                      className="text-sm"
-                      animate={{
-                        scale: [1, 1.01, 1],
-                      }}
-                      transition={{
-                        duration: 3,
-                        repeat: Infinity,
-                        ease: "easeInOut",
-                        delay: idx * 0.1
-                      }}
+          {/* Section 3 — Game Master */}
+          <section className="flex flex-col min-h-0 h-full">
+            <Card className={`${panelClass} h-full`}>
+              <CardHeader className="py-2 px-3 shrink-0">
+                <CardTitle className="text-sm flex items-center gap-2">
+                  <MessageCircle className="h-4 w-4" /> Game Master
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="px-3 pb-3 flex flex-col flex-1 min-h-0 gap-2">
+                <div className="flex-1 min-h-0 overflow-y-auto space-y-1 rounded bg-black/30 p-2">
+                  {(gameState.game_master_chat_history ?? []).map((msg, idx) => (
+                    <div
+                      key={idx}
+                      className={`text-xs p-1.5 rounded whitespace-pre-wrap ${
+                        msg.role === "user" ? "bg-purple-700/30 ml-2" : "bg-blue-800/30 mr-2"
+                      }`}
                     >
                       {msg.content}
-                    </motion.p>
-                  </motion.div>
-                ))}
-                <div ref={gameMasterChatEndRef} />
-              </div>
-              <div className="flex gap-2">
-                <Input
-                  value={gameMasterMessage}
-                  onChange={(e) => setGameMasterMessage(e.target.value)}
-                  onKeyPress={(e) => e.key === "Enter" && handleGameMasterChat()}
-                  placeholder="Ask the Game Master..."
-                  className="bg-black/50 border-purple-700/40"
-                />
-                <Button onClick={handleGameMasterChat} size="icon">
-                  <Send className="h-4 w-4" />
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* NPC Chat */}
-          <Card className="bg-black/60 backdrop-blur-md border-purple-700/40">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Users className="h-5 w-5" />
-                NPC Chat
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <Select value={selectedNpc || ""} onValueChange={setSelectedNpc}>
-                <SelectTrigger className="bg-black/50 border-purple-700/40">
-                  <SelectValue placeholder="Select NPC" />
-                </SelectTrigger>
-                <SelectContent>
-                  {gameState.npc_states.map((npc) => (
-                    <SelectItem key={npc.npc_id} value={npc.npc_id}>
-                      {npc.name} ({npc.role})
-                    </SelectItem>
+                    </div>
                   ))}
-                </SelectContent>
-              </Select>
-
-              {selectedNpc && (
-                <>
-                  <div className="h-48 overflow-y-auto space-y-2 bg-black/30 rounded-lg p-2">
-                    <p className="text-xs text-gray-400">Chat with NPC...</p>
-                  </div>
-                  <div className="flex gap-2">
-                    <Input
-                      value={npcMessage}
-                      onChange={(e) => setNpcMessage(e.target.value)}
-                      onKeyPress={(e) => e.key === "Enter" && handleNPCChat()}
-                      placeholder="Ask NPC..."
-                      className="bg-black/50 border-purple-700/40"
-                    />
-                    <Button onClick={handleNPCChat} size="icon" disabled={!selectedNpc}>
-                      <Send className="h-4 w-4" />
-                    </Button>
-                  </div>
-                </>
-              )}
-            </CardContent>
-          </Card>
-
-          {/* Model Configuration */}
-          <Card className="bg-black/60 backdrop-blur-md border-purple-700/40">
-            <CardHeader>
-              <CardTitle className="text-sm">Model Config</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-2">
-              <Select
-                value={modelConfig.provider}
-                onValueChange={(value) => setModelConfig({ ...modelConfig, provider: value })}
-              >
-                <SelectTrigger className="bg-black/50 border-purple-700/40 text-xs">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="google">Google</SelectItem>
-                  <SelectItem value="openai">OpenAI</SelectItem>
-                </SelectContent>
-              </Select>
-              <Input
-                placeholder="Model name (optional)"
-                value={modelConfig.model_name}
-                onChange={(e) => setModelConfig({ ...modelConfig, model_name: e.target.value })}
-                className="bg-black/50 border-purple-700/40 text-xs"
-              />
-              <Input
-                type="password"
-                placeholder="API key (optional)"
-                value={modelConfig.api_key}
-                onChange={(e) => setModelConfig({ ...modelConfig, api_key: e.target.value })}
-                className="bg-black/50 border-purple-700/40 text-xs"
-              />
-            </CardContent>
-          </Card>
+                  {isGameMasterStreaming &&
+                    (gameState.game_master_chat_history ?? []).slice(-1)[0]?.role !== "assistant" && (
+                      <p className="text-xs text-gray-400 flex items-center gap-1">
+                        <Loader2 className="h-3 w-3 animate-spin" /> Thinking…
+                      </p>
+                    )}
+                  <div ref={gameMasterChatEndRef} />
+                </div>
+                <div className="flex gap-1 shrink-0">
+                  <Input
+                    value={gameMasterMessage}
+                    onChange={(e) => setGameMasterMessage(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && !isGameMasterStreaming && handleGameMasterChat()}
+                    placeholder={isGameMasterStreaming ? "Responding…" : "Ask Game Master…"}
+                    disabled={isGameMasterStreaming}
+                    className="h-8 text-xs bg-black/50 border-purple-700/40"
+                  />
+                  <Button
+                    size="icon"
+                    className="h-8 w-8 shrink-0"
+                    onClick={handleGameMasterChat}
+                    disabled={isGameMasterStreaming}
+                  >
+                    {isGameMasterStreaming ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : (
+                      <Send className="h-3 w-3" />
+                    )}
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          </section>
         </div>
       </div>
     </div>
   )
 }
+

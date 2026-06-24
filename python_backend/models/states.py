@@ -296,7 +296,18 @@ class PreviousCases(BaseModel):
         ]
     
     def add_case(self, case: CaseState):
-        self.cases.append({"case_state_id": case.case_state_id, 'difficulty_level': case.case_metadata.difficulty_level, "clinical_case_scenario_description": case.clinical_case_scenario_description, "diagnosis": case.diagnosis, "question": case.question})
+        difficulty = (
+            case.case_metadata.difficulty_level
+            if case.case_metadata is not None
+            else self.current_difficulty_level
+        )
+        self.cases.append({
+            "case_state_id": case.case_state_id,
+            "difficulty_level": difficulty,
+            "clinical_case_scenario_description": case.clinical_case_scenario_description,
+            "diagnosis": case.diagnosis,
+            "question": case.question,
+        })
         self.n_cases_generated += 1
         return self
     

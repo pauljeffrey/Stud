@@ -15,6 +15,7 @@ import uuid
 logger = logging.getLogger(__name__)
 
 from models.states import GameState, GameConfig, CaseState, PerformanceAnalysis, Achievement, UserDetails
+from api.game_state_utils import parse_client_game_state
 from agents.game_world_agent import get_game_world_agent
 from agents.game_master import get_game_master_agent
 from agents.npc_agent import get_npc_agent
@@ -29,6 +30,16 @@ router = APIRouter()
 supabase = get_database_service().client
 
 
+def _valid_uuid(value: Optional[str]) -> Optional[str]:
+    """Return a canonical UUID string, or None if the value is not a valid UUID."""
+    if not value:
+        return None
+    try:
+        return str(uuid.UUID(str(value)))
+    except (ValueError, TypeError):
+        return None
+
+
 async def _sb(fn):
     """Run a blocking Supabase call on the default thread executor."""
     return await asyncio.to_thread(fn)
@@ -39,6 +50,38 @@ async def get_redis():
     service = await get_redis_service()
     await service._ensure_connected()
     return service.client
+
+
+async def _cache_game_state(game_state: GameState) -> None:
+    try:
+        redis_conn = await get_redis()
+        if redis_conn:
+            await redis_conn.setex(
+                f"gs:{game_state.game_id}",
+                3600,
+                json.dumps(game_state.model_dump(mode="json")),
+            )
+    except Exception as exc:
+        logger.debug("Redis cache skipped: %s", exc)
+
+
+async def _persist_game_state_update(game_state: GameState) -> None:
+    db_user_id = _valid_uuid(game_state.user_id)
+    if not db_user_id:
+        return
+    try:
+        update_payload = {
+            "state": game_state.model_dump(mode="json"),
+            "updated_at": datetime.now().isoformat(),
+        }
+        await _sb(
+            lambda: supabase.table("game_states")
+            .update(update_payload)
+            .eq("id", game_state.game_id)
+            .execute()
+        )
+    except Exception as exc:
+        logger.warning("DB update skipped for game %s: %s", game_state.game_id, exc)
 
 
 # ============================================
@@ -162,7 +205,10 @@ async def get_game_settings():
 
 
 @router.post("/game/initialize")
-async def initialize_game(request: InitializeGameRequest):
+async def initialize_game(
+    request: InitializeGameRequest,
+    authorization: Optional[str] = Header(None),
+):
     """
     Initialize a new game adventure
     Creates game world, first case, and NPCs
@@ -208,8 +254,15 @@ async def initialize_game(request: InitializeGameRequest):
                 except Exception:
                     pass  # Continue if check fails
         else:
-            # Get user ID from request (passed by frontend when logged in) or placeholder
-            user_id = request.user_id or "user_123"
+            from api.auth_deps import decode_jwt_user_id
+
+            jwt_uid = decode_jwt_user_id(authorization)
+            user_id = _valid_uuid(jwt_uid) or _valid_uuid(request.user_id)
+            if not user_id:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Authentication required to start a registered game",
+                )
         
         # Get game master agent (singleton pattern - reuses instance)
         try:
@@ -251,11 +304,11 @@ async def initialize_game(request: InitializeGameRequest):
             await redis_service.save_game_session_state(
                 user_id=user_id,
                 session_id=game_state.game_id,
-                game_world=game_world.model_dump(mode="json", default=str),
-                game_state=game_state.model_dump(mode="json", default=str),
-                case_state=case_state.model_dump(mode="json", default=str),
-                npc_states=[npc.model_dump(mode="json", default=str) for npc in npc_states],
-                previous_cases=previous_cases.model_dump(mode="json", default=str) if previous_cases else None,
+                game_world=game_world.model_dump(mode="json"),
+                game_state=game_state.model_dump(mode="json"),
+                case_state=case_state.model_dump(mode="json"),
+                npc_states=[npc.model_dump(mode="json") for npc in npc_states],
+                previous_cases=previous_cases.model_dump(mode="json") if previous_cases else None,
                 ttl=3600
             )
             
@@ -269,43 +322,57 @@ async def initialize_game(request: InitializeGameRequest):
             # Log error but continue - Redis is optional
             print(f"Redis cache error (non-critical): {e}")
         
-        # Save to Supabase with error handling
-        try:
-            insert_payload = {
-                "id": game_state.game_id,
-                "user_id": game_state.user_id,
-                "case_id": game_state.case_id,
-                "state": game_state.model_dump(mode="json", default=str),
-                "is_demo": request.is_demo,
-                "created_at": datetime.now().isoformat(),
-                "updated_at": datetime.now().isoformat(),
-            }
-            await _sb(lambda: supabase.table("game_states").insert(insert_payload).execute())
-            
-            # Save previous cases to prevent duplicates
-            if previous_cases:
-                from service.database import get_database_service
-                db_service = get_database_service()
-                for case in previous_cases.cases:
-                    await db_service.save_previous_case(
-                        game_id=game_state.game_id,
-                        case_state_id=case.case_state_id,
-                        case_number=previous_cases.cases.index(case) + 1,
-                        scenario_summary=case.clinical_case_scenario_description[:200],
-                        diagnosis=case.diagnosis,
-                        question_summary=case.question[:200],
-                        difficulty_level=str(game_state.difficulty_level)
+        # Persist to Supabase in the background — Redis already holds the full state,
+        # so the response can be returned immediately without waiting for DB writes.
+        async def _persist_to_db():
+            try:
+                # Demo / anonymous sessions live in Redis only — user_id is not a UUID.
+                if request.is_demo:
+                    return
+                db_user_id = _valid_uuid(game_state.user_id)
+                if not db_user_id:
+                    logger.warning(
+                        "Skipping DB persist for game %s — invalid user_id %r",
+                        game_state.game_id,
+                        game_state.user_id,
                     )
-        except Exception as e:
-            logger.exception("Failed to save game state to Supabase")
-            raise HTTPException(status_code=500, detail=f"Failed to save game state: {str(e)}")
+                    return
+
+                insert_payload = {
+                    "id": game_state.game_id,
+                    "user_id": db_user_id,
+                    "case_id": game_state.case_id,
+                    "state": game_state.model_dump(mode="json"),
+                    "is_demo": request.is_demo,
+                    "created_at": datetime.now().isoformat(),
+                    "updated_at": datetime.now().isoformat(),
+                }
+                await _sb(lambda: supabase.table("game_states").insert(insert_payload).execute())
+
+                if previous_cases:
+                    from service.database import get_database_service
+                    db_service = get_database_service()
+                    for case in previous_cases.cases:
+                        await db_service.save_previous_case(
+                            game_id=game_state.game_id,
+                            case_state_id=case.case_state_id,
+                            case_number=previous_cases.cases.index(case) + 1,
+                            scenario_summary=case.clinical_case_scenario_description[:200],
+                            diagnosis=case.diagnosis,
+                            question_summary=case.question[:200],
+                            difficulty_level=str(game_state.difficulty_level)
+                        )
+            except Exception:
+                logger.exception("Background DB persist failed for game %s", game_state.game_id)
+
+        asyncio.create_task(_persist_to_db())
         
         return {
             "success": True,
-            "game_state": game_state.model_dump(mode="json", default=str),
-            "game_world": game_world.model_dump(mode="json", default=str),
-            "case_state": case_state.model_dump(mode="json", default=str),
-            "npc_states": [npc.model_dump(mode="json", default=str) for npc in npc_states]
+            "game_state": game_state.model_dump(mode="json"),
+            "game_world": game_world.model_dump(mode="json"),
+            "case_state": case_state.model_dump(mode="json"),
+            "npc_states": [npc.model_dump(mode="json") for npc in npc_states]
         }
         
     except HTTPException:
@@ -321,7 +388,7 @@ async def game_master_chat(request: GameMasterChatRequest):
     async def generate_response():
         try:
             # Parse game state
-            game_state = GameState(**request.game_state)
+            game_state = parse_client_game_state(request.game_state)
             
             # Get game master agent
             game_master = get_game_master_agent(
@@ -354,16 +421,20 @@ async def game_master_chat(request: GameMasterChatRequest):
             # Note: Chat history should be managed by the frontend or stored separately
             # GameState model doesn't include chat_history fields
             
-            # Stream response
-            words = response.split()
-            for i, word in enumerate(words):
+            # Stream response in small chunks to mimic token-by-token output
+            chunk_size = 4
+            text = response or ""
+            total = max(1, (len(text) + chunk_size - 1) // chunk_size)
+            for i, start in enumerate(range(0, len(text), chunk_size)):
+                piece = text[start : start + chunk_size]
+                is_last = i == total - 1
                 chunk = {
-                    "content": word + " ",
-                    "complete": i == len(words) - 1,
-                    "updated_game_state": game_state.model_dump(mode="json", default=str) if i == len(words) - 1 else None
+                    "content": piece,
+                    "complete": is_last,
+                    "updated_game_state": game_state.model_dump(mode="json") if is_last else None,
                 }
                 yield f"data: {json.dumps(chunk)}\n\n"
-                await asyncio.sleep(0.03)
+                await asyncio.sleep(0.02)
                 
         except Exception as e:
             error_chunk = {"error": str(e), "complete": True}
@@ -383,7 +454,7 @@ async def npc_chat(request: NPCChatRequest):
     async def generate_response():
         try:
             # Parse game state
-            game_state = GameState(**request.game_state)
+            game_state = parse_client_game_state(request.game_state)
             
             # Find NPC from case state's npc_states list
             npc_states = game_state.case_state.npc_states or []
@@ -454,7 +525,7 @@ async def update_case_state(request: UpdateCaseStateRequest):
     """
     try:
         # Parse game state
-        game_state = GameState(**request.game_state)
+        game_state = parse_client_game_state(request.game_state)
         
         game_master = get_game_master_agent(
             model_name=request.model_name,
@@ -511,35 +582,12 @@ async def update_case_state(request: UpdateCaseStateRequest):
                 final_performance=latest_performance
             )
         
-        # Update cache and database with error handling
-        try:
-            redis_conn = await get_redis()
-            if redis_conn:
-                await redis_conn.setex(
-                    f"gs:{game_state.game_id}",
-                    3600,
-                    json.dumps(game_state.model_dump(), default=str)
-                )
-        except Exception as e:
-            print(f"Redis cache error (non-critical): {e}")
-        
-        try:
-            update_payload = {
-                "state": game_state.model_dump(mode="json", default=str),
-                "updated_at": datetime.now().isoformat(),
-            }
-            await _sb(
-                lambda: supabase.table("game_states")
-                .update(update_payload)
-                .eq("id", game_state.game_id)
-                .execute()
-            )
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to save game state: {str(e)}")
+        await _cache_game_state(game_state)
+        await _persist_game_state_update(game_state)
         
         return {
             "success": True,
-            "game_state": game_state.model_dump(mode="json", default=str),
+            "game_state": game_state.model_dump(mode="json"),
             "state_change": {
                 "escalation_level": state_change.escalation_level,
                 "change_description": state_change.change_description,
@@ -557,14 +605,14 @@ async def use_clue(request: UseClueRequest):
     """Use a clue (triggers penalty)"""
     try:
         # Parse game state
-        game_state = GameState(**request.game_state)
+        game_state = parse_client_game_state(request.game_state)
         
         # Mark clue as used
         game_state.case_state.clue_used = True
         
         # Update state (will apply penalty)
         update_request = UpdateCaseStateRequest(
-            game_state=request.game_state,
+            game_state=game_state.model_dump(mode="json"),
             clue_used=True,
             user_answer=request.user_answer,
             model_name=request.model_name,
@@ -583,7 +631,7 @@ async def submit_answer(request: SubmitAnswerRequest):
     """Submit answer and get performance analysis"""
     try:
         # Parse game state
-        game_state = GameState(**request.game_state)
+        game_state = parse_client_game_state(request.game_state)
         
         # Analyze performance
         performance = await _analyze_performance(
@@ -640,36 +688,13 @@ async def submit_answer(request: SubmitAnswerRequest):
             except Exception as xp_err:
                 print(f"Error awarding game XP: {xp_err}")
         
-        # Update cache and database with error handling
-        try:
-            redis_conn = await get_redis()
-            if redis_conn:
-                await redis_conn.setex(
-                    f"gs:{game_state.game_id}",
-                    3600,
-                    json.dumps(game_state.model_dump(), default=str)
-                )
-        except Exception as e:
-            print(f"Redis cache error (non-critical): {e}")
-        
-        try:
-            update_payload = {
-                "state": game_state.model_dump(mode="json", default=str),
-                "updated_at": datetime.now().isoformat(),
-            }
-            await _sb(
-                lambda: supabase.table("game_states")
-                .update(update_payload)
-                .eq("id", game_state.game_id)
-                .execute()
-            )
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to save game state: {str(e)}")
+        await _cache_game_state(game_state)
+        await _persist_game_state_update(game_state)
         
         resp = {
             "success": True,
-            "performance": performance.model_dump(mode="json", default=str),
-            "game_state": game_state.model_dump(mode="json", default=str),
+            "performance": performance.model_dump(mode="json"),
+            "game_state": game_state.model_dump(mode="json"),
         }
         if dice_effect_desc:
             resp["dice_effect"] = dice_effect_desc
@@ -683,7 +708,7 @@ async def submit_answer(request: SubmitAnswerRequest):
 async def apply_dice_effect(request: Dict[str, Any]):
     """Apply a standalone dice-roll effect to the current case state (toggleable)."""
     try:
-        game_state = GameState(**request.get("game_state", {}))
+        game_state = parse_client_game_state(request.get("game_state", {}))
         raw = request.get("dice_result")
         if raw is None:
             raw = request.get("diceResult", 5)
@@ -708,7 +733,7 @@ async def apply_dice_effect(request: Dict[str, Any]):
 
         try:
             update_payload = {
-                "state": game_state.model_dump(mode="json", default=str),
+                "state": game_state.model_dump(mode="json"),
                 "updated_at": datetime.now().isoformat(),
             }
             await _sb(
@@ -722,7 +747,7 @@ async def apply_dice_effect(request: Dict[str, Any]):
 
         return {
             "success": True,
-            "game_state": game_state.model_dump(mode="json", default=str),
+            "game_state": game_state.model_dump(mode="json"),
             "dice_result": dice_result,
             "change_description": state_change.change_description,
         }
@@ -877,7 +902,7 @@ async def save_game(request: SaveGameRequest):
     """
     try:
         # Parse game state
-        game_state = GameState(**request.game_state)
+        game_state = parse_client_game_state(request.game_state)
         user_id = request.user_id or game_state.user_id
         
         # Save to Supabase
@@ -885,7 +910,7 @@ async def save_game(request: SaveGameRequest):
             "id": game_state.game_id,
             "user_id": user_id,
             "case_id": game_state.case_id,
-            "state": game_state.model_dump(mode="json", default=str),
+            "state": game_state.model_dump(mode="json"),
             "is_active": True,
             "created_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat(),

@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from api.auth_deps import get_current_user_id, invalidate_user_cache
 from service.database import get_database_service
+from service.crypto_service import encrypt_field, decrypt_field
 
 router = APIRouter()
 
@@ -245,7 +246,7 @@ class ApiSettingsUpdate(BaseModel):
 
 @router.get("/user/settings")
 async def get_user_settings(user_id: str = Depends(get_current_user_id)):
-    """Get user's API settings (AI model config)."""
+    """Get user's API settings (AI model config). API key is decrypted before returning."""
     db = get_database_service()
     try:
         rows = await _to_thread(
@@ -253,7 +254,11 @@ async def get_user_settings(user_id: str = Depends(get_current_user_id)):
         )
         if not rows:
             raise HTTPException(status_code=404, detail="User not found")
-        return {"success": True, "settings": rows[0].get("api_settings") or {}}
+        settings: dict = dict(rows[0].get("api_settings") or {})
+        # Decrypt API key before returning to the client
+        if settings.get("apiKey"):
+            settings["apiKey"] = decrypt_field(settings["apiKey"])
+        return {"success": True, "settings": settings}
     except HTTPException:
         raise
     except Exception as e:
@@ -265,7 +270,7 @@ async def update_user_settings(
     payload: ApiSettingsUpdate,
     user_id: str = Depends(get_current_user_id),
 ):
-    """Merge-update user's API settings."""
+    """Merge-update user's API settings. API key is encrypted before storage."""
     db = get_database_service()
     try:
         rows = await _to_thread(
@@ -275,13 +280,20 @@ async def update_user_settings(
             raise HTTPException(status_code=404, detail="User not found")
         current = rows[0].get("api_settings") or {}
         updates = {k: v for k, v in payload.model_dump(exclude_none=True).items() if v is not None}
+        # Encrypt the API key before merging into storage
+        if "apiKey" in updates and updates["apiKey"]:
+            updates["apiKey"] = encrypt_field(updates["apiKey"])
         new_settings = {**current, **updates}
         await db.update_user(user_id, {
             "api_settings": new_settings,
             "updated_at": datetime.now().isoformat(),
         })
         await invalidate_user_cache(user_id)
-        return {"success": True, "settings": new_settings}
+        # Return decrypted settings to the client
+        display_settings = dict(new_settings)
+        if display_settings.get("apiKey"):
+            display_settings["apiKey"] = decrypt_field(display_settings["apiKey"])
+        return {"success": True, "settings": display_settings}
     except HTTPException:
         raise
     except Exception as e:

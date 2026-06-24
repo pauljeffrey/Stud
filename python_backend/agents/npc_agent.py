@@ -126,7 +126,7 @@ class NPCAgent:
         - Natural Conditions: {case_state.natural_conditions}
         - Nation Type: {case_state.nation_type}
         - Economic Advantage: {case_state.economic_advantage}
-        - Location: {case_state.location}
+        - Location: {game_world.location}
         - Hospital: {game_world.hospital_name}
         - Department: {game_world.department}
         - Additional Context: {json.dumps(game_world.additional_context, indent=2)}

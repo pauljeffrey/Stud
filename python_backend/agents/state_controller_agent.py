@@ -66,16 +66,17 @@ class StateControllerAgent:
             "Optionally call `time_urgency_note` with time_remaining_seconds and time_limit_seconds to align tension with time pressure."
         )
         self.system_prompt = """
-            You are the State Controller for Stud, a medical role-playing game. You are solely responsible for generating new clinical cases or escalating or de-escalating
-            already existing clinical cases. You control the degree of randomness and speed of escalation/de-escalation.
-
-            CRITICAL: The model answer (ground truth) and user's answer are the single most important inputs for determining how the clinical state changes.
-            Score the user's answer against the model answer:
-            - If correct: consider de-escalation or maintain
-            - If incorrect: consider escalation based on severity/degree of error
-            - If partially correct: adjust accordingly
-
-            In your updated clinical_case_scenario_description, you MUST first state whether the user's answer was correct or not (e.g. "User's answer was incorrect. The correct diagnosis is X. [rest of scenario].").
+            You are the State Controller for Stud. You escalate or de-escalate clinical cases based on user performance.
+            
+            BREVITY: clinical_case_scenario_description must be 3-5 concise sentences. No long paragraphs.
+            investigations and scan_images: only key findings, brief values.
+            
+            CRITICAL: Compare user answer to model answer:
+            - Correct → de-escalate or maintain
+            - Incorrect → escalate proportionally
+            - Partially correct → moderate adjustment
+            
+            Start updated clinical_case_scenario_description with whether the user's answer was correct.
             """ + self._tool_suffix
         model = get_state_controller_model(model_name, api_key)
         self.agent = Agent(
@@ -83,6 +84,13 @@ class StateControllerAgent:
             system_prompt=self.system_prompt,
             output_type=CaseState,
             tools=_state_controller_tool_fns(self),
+        )
+        # Tool-free agent for new case generation — skips escalation tools
+        # that would otherwise add 2 extra LLM round-trips on every init call.
+        self._generation_agent = Agent(
+            model,
+            system_prompt=self.system_prompt,
+            output_type=CaseState,
         )
 
     def _reinitialize_model(self, model_name: Optional[str] = None, api_key: Optional[str] = None):
@@ -97,10 +105,19 @@ class StateControllerAgent:
             output_type=CaseState,
             tools=_state_controller_tool_fns(self),
         )
+        self._generation_agent = Agent(
+            model,
+            system_prompt=self.system_prompt,
+            output_type=CaseState,
+        )
 
     async def generate_case(self, prompt: str) -> CaseState:
-        """Generate a brand-new clinical case from a prompt."""
-        result = await self.agent.run(prompt)
+        """Generate a brand-new clinical case from a prompt.
+
+        Uses the tool-free agent so escalation tools are not invoked,
+        saving 2 extra LLM round-trips compared to self.agent.
+        """
+        result = await self._generation_agent.run(prompt)
         return result.output
 
     async def update_case_state(

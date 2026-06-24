@@ -124,7 +124,23 @@ export async function apiFetch(input: RequestInfo, init: RequestInit = {}): Prom
   return res
 }
 
-/** React hook: live auth state across tabs and within the same tab. */
+/** Returns the milliseconds until the JWT expires (negative if already expired). */
+function msUntilExpiry(token: string | null): number {
+  if (!token) return -1
+  const parts = token.split(".")
+  if (parts.length !== 3) return Infinity // opaque token; assume valid
+  try {
+    const payload = JSON.parse(atob(parts[1].replace(/-/g, "+").replace(/_/g, "/")))
+    if (typeof payload.exp !== "number") return Infinity
+    return payload.exp * 1000 - Date.now()
+  } catch {
+    return Infinity
+  }
+}
+
+/** React hook: live auth state across tabs and within the same tab.
+ *  Also proactively refreshes the JWT when it is within 2 hours of expiry
+ *  so users stay logged in without hitting a 401 mid-session. */
 export function useAuth() {
   const [user, setUser] = useState<AuthUser | null>(null)
   const [token, setToken] = useState<string | null>(null)
@@ -135,27 +151,58 @@ export function useAuth() {
     setToken(getToken())
   }, [])
 
+  // Proactive refresh: renew the JWT before it expires so the user stays logged in.
+  const proactiveRefresh = useCallback(async () => {
+    const t = getToken()
+    if (!t) return
+    const remaining = msUntilExpiry(t)
+    // Refresh if token expires within 2 hours (and is not already expired)
+    if (remaining > 0 && remaining < 2 * 60 * 60 * 1000) {
+      const ok = await refreshAccessToken()
+      if (ok) sync()
+    }
+  }, [sync])
+
   useEffect(() => {
     sync()
     setReady(true)
     if (typeof window === "undefined") return
+
     const onStorage = (e: StorageEvent) => {
       if (e.key === TOKEN_KEY || e.key === USER_KEY) sync()
     }
     const onCustom = () => sync()
     window.addEventListener("storage", onStorage)
     window.addEventListener(AUTH_EVENT, onCustom as EventListener)
+
+    // Run once on mount, then every 30 minutes
+    proactiveRefresh()
+    const refreshInterval = setInterval(proactiveRefresh, 30 * 60 * 1000)
+
+    // Also refresh when the user returns to the tab
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") proactiveRefresh()
+    }
+    document.addEventListener("visibilitychange", onVisibility)
+
     return () => {
       window.removeEventListener("storage", onStorage)
       window.removeEventListener(AUTH_EVENT, onCustom as EventListener)
+      clearInterval(refreshInterval)
+      document.removeEventListener("visibilitychange", onVisibility)
     }
-  }, [sync])
+  }, [sync, proactiveRefresh])
 
   const logout = useCallback(async () => {
-    try {
-      await apiFetch("/api/auth/logout", { method: "POST" }).catch(() => null)
-    } finally {
-      clearAuth()
+    const token = getToken()
+    // Clear local auth immediately — the user is logged out on this device right away.
+    clearAuth()
+    // Notify the server in the background (best-effort; never block the redirect).
+    if (token) {
+      fetch("/api/auth/logout", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      }).catch(() => null)
     }
   }, [])
 
