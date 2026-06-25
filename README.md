@@ -119,21 +119,21 @@ Stud uses a **specialized multi-agent architecture** built on [Pydantic-AI](http
 
 ### Agent roster
 
-| Agent | Module | Primary responsibility | Typed output |
-|-------|--------|------------------------|--------------|
-| **Game World Agent** | `agents/game_world_agent.py` | Immersive setting from `GameConfig` (profession, era, hospital, resources) | `GameWorldModel` |
-| **Game Master Agent** | `agents/game_master.py` | Case metadata, achievements, player chat, world updates, handoff orchestration | `GameState`, `GameStateUpdateOutput`, `str` (chat) |
-| **State Controller Agent** | `agents/state_controller_agent.py` | Case escalation/de-escalation from answers, clues, dice, time pressure | `CaseState`, `StateChangeResponse` |
-| **NPC Agent** | `agents/npc_agent.py` | Batch NPC generation + in-character dialogue | `List[NPCState]`, `str` (chat) |
-| **Achievement Sub-agent** | `agents/achievement_subagent.py` | Career/promotion/reward achievements after case completion | `AchievementGenerationOutput` |
-| **Tutor Agent** | `agents/tutor_agent.py` | Document-grounded study chat (RAG) | `TutorResponse` |
-| **Quiz Agent** | `agents/quiz_agent.py` | Quiz generation and open-ended scoring | `Quiz`, scores |
-| **File Parser Agent** | `agents/file_parser_agent.py` | Extract text from uploaded documents | Structured parse output |
+| Agent | Module | Primary responsibility |
+|-------|--------|------------------------|
+| **Game World Agent** | `agents/game_world_agent.py` | Immersive setting from `GameConfig` (profession, era, hospital, resources) | 
+| **Game Master Agent** | `agents/game_master.py` | Case metadata, achievements, player chat, world updates, handoff orchestration |
+| **State Controller Agent** | `agents/state_controller_agent.py` | Case escalation/de-escalation from answers, clues, dice, time pressure |
+| **NPC Agent** | `agents/npc_agent.py` | Batch NPC generation + in-character dialogue |
+| **Achievement Sub-agent** | `agents/achievement_subagent.py` | Career/promotion/reward achievements after case completion |
+| **Tutor Agent** | `agents/tutor_agent.py` | Document-grounded study chat (RAG) |
+| **Quiz Agent** | `agents/quiz_agent.py` | Quiz generation and open-ended scoring |
+| **File Parser Agent** | `agents/file_parser_agent.py` | Extract text from uploaded documents |
 
 Models are resolved per agent via `agents/agents.py` (`get_game_master_model`, `get_npc_model`, etc.), with **user BYOK** or **system fallback** through `select_model_with_fallback()` in `model.py`.
 
 ---
-
+## Engineering Bottlenecks
 ### 1. External LLM latency and rate limits
 
 The backend is **I/O-bound**: most request time waits on OpenRouter, Gemini, or OpenAI. Game initialization alone may invoke the Game World Agent, Game Master, State Controller, and NPC Agent in sequence—often **10–30+ seconds** on cold paths.
@@ -163,10 +163,8 @@ Uploading and chunking PDFs/DOCX/PPT is **CPU- and memory-intensive** (100–300
 | **Pydantic-strict game state** | Type safety, fewer silent data bugs | Client must send complete backend fields |
 | **Redis cache** | Fast session reads, demo support | Optional dependency; cache/DB can diverge briefly |
 | **BYOK** | User cost control, model choice | Encryption key management; support burden |
-| **SSE streaming** | Responsive chat UX | Harder error handling; proxy must forward headers |
+| **SSE streaming** | Responsive chat UX | Harder error handling |
 | **Concise generation prompts** | Faster tokens, cleaner UI | Less narrative richness per case |
-| **Fail-open rate limits / session writes** | Auth works under partial outages | Weaker abuse protection when Redis/DB flaky |
-| **Next.js proxy vs direct API calls** | Security, single origin | Extra hop; duplicate route files |
 
 ---
 
@@ -194,7 +192,7 @@ From internal capacity analysis (`python_backend/about/capacity-and-scaling.md`)
 | **Backend** | FastAPI, Pydantic v2, Pydantic-AI, Uvicorn/Gunicorn |
 | **AI** | OpenRouter, Google Gemini, OpenAI (user-selectable) |
 | **Data** | Supabase (PostgreSQL), Redis, pgvector / Pinecone |
-| **Auth** | JWT (python-jose), bcrypt, Fernet encryption |
+| **Auth** | JWT, bcrypt, Fernet encryption |
 | **Infra** | Docker Compose, optional AWS S3 |
 
 ---
@@ -261,6 +259,3 @@ pytest tests/ai_tests -v
 
 ---
 
-## License
-
-Proprietary — All rights reserved.
