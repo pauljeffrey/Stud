@@ -2,198 +2,193 @@
 
 **Master Medicine Through Adventure**
 
-Stud is a gamified medical education platform that combines multi-agent AI orchestration, structured clinical state management, and immersive UI to turn healthcare learning into an interactive role-playing experience. It supports three learning modes: **Mediquest** (clinical adventures), **Study** (document-grounded chat), and **Quiz** (assessment) behind a unified FastAPI backend and Next.js frontend.
+Stud is a gamified medical education platform that turns clinical learning into an interactive adventure. Learners work through realistic cases, chat with AI characters, study their own documents, and take smart quizzes—all in one product.
 
 ---
 
 ## Table of Contents
 
 - [Overview](#overview)
-- [Decision & Idea Choices](#decision--idea-choices)
-- [Architectural Choices](#architectural-choices)
-- [Multi-Agent Workflow & Design](#multi-agent-workflow--design)
-- [Engineering Bottlenecks](#engineering-bottlenecks)
+- [Key Product Decisions](#key-product-decisions)
+- [How the System Is Built](#how-the-system-is-built)
+- [How the AI Agents Work Together](#how-the-ai-agents-work-together)
+- [Challenges & How They Were Handled](#challenges--how-they-were-handled)
 - [Trade-offs](#trade-offs)
-- [Evaluation](#evaluation)
-- [Edge Cases](#edge-cases)
-- [Academic Work](#academic-work)
+- [Quality & Testing](#quality--testing)
+- [Academic & Professional Context](#academic--professional-context)
 - [Tech Stack](#tech-stack)
 - [Project Structure](#project-structure)
 - [Quick Start](#quick-start)
-- [Further Documentation](#further-documentation)
 
 ---
 
 ## Overview
 
-Stud targets a gap between static medical content (PDFs, question banks) and passive AI chatbots. The platform treats clinical learning as a **stateful game**: worlds are generated, cases evolve based on performance, NPCs provide in-character guidance, and outcomes feed achievements and progression metrics.
+Most medical tools are either static (PDFs, question banks) or generic chatbots. Stud sits in the middle: **structured, game-like clinical practice** with feedback, progression, and multiple ways to learn.
 
-| Mode | Purpose | Core mechanism |
-|------|---------|----------------|
-| **Mediquest** | Immersive clinical scenarios | Multi-agent game loop (world → case → escalation → handoff) |
-| **Study** | Document-based learning | RAG over uploaded files with streaming tutor chat |
-| **Quiz** | Knowledge assessment | AI-generated MCQ + open-ended questions with LLM scoring |
+| Mode | What the user does | What makes it different |
+|------|--------------------|------------------------|
+| **Mediquest** | Play through clinical scenarios like a role-playing game | Cases change based on your answers; NPCs and a Game Master guide you |
+| **Study** | Upload notes or textbooks and ask questions | Answers are grounded in *your* documents, not generic web text |
+| **Quiz** | Take AI-generated tests | Mix of multiple choice and written answers with automated feedback |
 
 ---
 
-## Decision & Idea Choices
+## Key Product Decisions
 
-### 1. Gamification over static content delivery
+### 1. Learning as a game, not a slideshow
 
-**Choice:** Frame medical education as a role-playing adventure with timers, clues, NPCs, achievements, and escalating cases not as a linear quiz app.
+Clinical skills improve with practice under pressure. Stud uses timers, clues, characters, achievements, and cases that get harder or easier—so learners repeat scenarios instead of memorizing once.
 
-**Rationale:** Clinical reasoning benefits from narrative context, time pressure, and iterative decision-making. A game loop encourages repeated practice with varied scenarios rather than one-shot memorization.
+### 2. Several focused AI roles instead of one “do everything” bot
 
-### 2. Multi-agent decomposition instead of a single mega-prompt
+Each part of the product has its own AI job, similar to roles on a clinical team:
 
-**Choice:** Split responsibilities across specialized agents rather than one monolithic LLM call for all game logic.
+| AI role | What it does |
+|---------|----------------|
+| **World builder** | Creates the hospital setting, era, and context |
+| **Game Master** | Writes cases, tracks progress, chats with the learner |
+| **Case controller** | Makes the scenario harder or easier based on performance |
+| **NPC characters** | Patients, nurses, colleagues—in-character dialogue |
+| **Tutor & Quiz AI** | Document study help and test generation |
 
-| Agent | Responsibility |
-|-------|----------------|
-| **Game World Agent** | Setting, hospital, era, resource constraints |
-| **Game Master Agent** | Case generation, achievements, orchestration, player chat |
-| **State Controller Agent** | Escalation/de-escalation based on answers and performance |
-| **NPC Agent** | In-character dialogue tied to case context |
-| **Quiz / Tutor agents** | Assessment and document-grounded tutoring |
+This keeps responses more reliable than asking one model to handle everything at once.
 
-**Rationale:** Separation improves prompt focus, allows independent model selection per agent, and mirrors how clinical teams divide roles (environment, case lead, bedside staff).
+### 3. Clear data rules for game progress
 
-### 3. Structured state models (Pydantic) as the contract
+Game progress (scores, case state, achievements) follows strict, validated structures before it is saved. That reduces bugs when the website and server exchange information during play.
 
-**Choice:** Represent game progress in typed models (`GameState`, `CaseState`, `PerformanceAnalysis` etc) with a shared `CommonFields` abstraction for repeated metadata.
+### 4. Optional personal AI keys
 
-**Rationale:** LLM outputs are validated and normalized before persistence. The API and frontend share a predictable schema instead of ad-hoc JSON blobs.
+Users can connect their own AI provider keys (stored encrypted). If they do not, the platform uses default models so demos and onboarding still work.
 
-### 4. Bring-your-own-key (BYOK) with platform fallback
+### 5. Try-before-you-register demo
 
-**Choice:** Users may supply their own model name and API key (encrypted at rest); the backend falls back to system-configured models when user credentials are missing or invalid.
+Anonymous demo sessions run without full account setup. Progress is kept in fast temporary storage so new users can explore before signing up.
 
-**Rationale:** Reduces platform LLM cost for power users, supports model preference, and keeps demo/onboarding functional without mandatory key setup.
 ---
 
-## Architectural Choices
+## How the System Is Built
 
-### System topology
+Stud is a **web app plus API server**—a common, maintainable split:
 
 ```
-┌─────────────────┐     /api/* proxy      ┌──────────────────────────────┐
-│  Next.js 16     │ ───────────────────►  │  FastAPI (python_backend)    │
-│  React 18       │     SSE for chat      │  Pydantic-AI agents          │
-│  Tailwind/Radix │                       │  game_v2 · quiz · learning   │
-└─────────────────┘                       └──────────────┬───────────────┘
-                                                         │
-                    ┌────────────────────────────────────┼────────────────────────┐
-                    ▼                    ▼                 ▼                        ▼
-              Supabase (PG)          Redis           OpenRouter /              Pinecone /
-              users, games,            sessions,       Gemini / OpenAI           pgvector
-              quizzes, docs            hot cache       (via pydantic-ai)         (RAG)
+  Browser (website)  ──►  API server  ──►  Database & cache
+                              │
+                              └──►  AI services (Gemini, OpenAI, etc.)
 ```
 
-### Backend layering
+| Part | Role in plain terms |
+|------|---------------------|
+| **Website** | What users see: game screen, study chat, quizzes, dashboard |
+| **API server** | Business logic, AI calls, login, saving progress |
+| **Database** | User accounts, saved games, quizzes, uploaded files |
+| **Cache** | Fast access to active game sessions |
+| **AI providers** | Generate cases, chat replies, quiz questions |
 
-| Layer | Location | Role |
-|-------|----------|------|
-| **API routers** | `python_backend/api/` | HTTP contracts, auth deps, rate limits, SSE responses |
-| **Agents** | `python_backend/agents/` | LLM orchestration, tool use, streaming generation |
-| **Models** | `python_backend/models/` | Pydantic schemas for game, quiz, tutor flows |
-| **Services** | `python_backend/service/` | Database, Redis, S3, crypto, document processing |
-| **Config** | `python_backend/configs/` | Game settings enums, environment-driven model names |
+**Security highlights:** Password-based login with secure tokens, encrypted storage for user API keys, and rate limiting to reduce abuse.
 
-
-### Authentication & security
-
-- Custom JWT + bcrypt (not Supabase Auth); sessions stored in `user_sessions` with best-effort writes so auth never hard-fails on missing tables.
-- API keys encrypted with **Fernet (AES-128-CBC + HMAC)** before Supabase storage; legacy plain-text values still decrypt.
-- Rate limiting with **fail-open** wrapper so Redis outages do not block login.
-
-### Deployment
-
-- **Backend:** Docker Compose
-- **Frontend:** Vercel-compatible Next.js build.
+**Deployment:** Backend runs in Docker; frontend is built for modern hosting (e.g. Vercel).
 
 ---
 
-## Multi-Agent Workflow & Design
+## How the AI Agents Work Together
 
-Stud uses a **specialized multi-agent architecture** built on [Pydantic-AI](https://ai.pydantic.dev/). Each agent owns a narrow domain, produces typed Pydantic outputs, and is invoked by FastAPI routers not by other agents calling each other directly in most paths. The **Game Master** acts as the orchestrator for Mediquest.
+### Starting a Mediquest game
 
-### Agent roster
+1. **World builder** creates the setting (hospital, specialty, difficulty context).
+2. **Game Master** sets up the adventure and first case.
+3. **Case controller** writes the clinical scenario and question.
+4. **NPC builder** creates characters (patient, staff, etc.).
+5. Progress is saved so the learner can continue without reloading everything.
 
-| Agent | Module | Primary responsibility |
-|-------|--------|------------------------|
-| **Game World Agent** | `agents/game_world_agent.py` | Immersive setting from `GameConfig` (profession, era, hospital, resources) | 
-| **Game Master Agent** | `agents/game_master.py` | Case metadata, achievements, player chat, world updates, handoff orchestration |
-| **State Controller Agent** | `agents/state_controller_agent.py` | Case escalation/de-escalation from answers, clues, dice, time pressure |
-| **NPC Agent** | `agents/npc_agent.py` | Batch NPC generation + in-character dialogue |
-| **Achievement Sub-agent** | `agents/achievement_subagent.py` | Career/promotion/reward achievements after case completion |
-| **Tutor Agent** | `agents/tutor_agent.py` | Document-grounded study chat (RAG) |
-| **Quiz Agent** | `agents/quiz_agent.py` | Quiz generation and open-ended scoring |
-| **File Parser Agent** | `agents/file_parser_agent.py` | Extract text from uploaded documents |
+### While playing
 
-Models are resolved per agent via `agents/agents.py` (`get_game_master_model`, `get_npc_model`, etc.).
+| Learner action | Which AI is involved |
+|----------------|----------------------|
+| Chat with Game Master | Game Master |
+| Talk to a patient or colleague | NPC character AI |
+| Use a hint | Case controller (often makes the case harder) |
+| Submit an answer | Scoring AI + case controller |
+| Finish a case | Game Master awards achievements and loads the next case |
+
+### Study & Quiz modes
+
+- **Study:** Documents are parsed, indexed, then a tutor AI answers using that content.
+- **Quiz:** A dedicated quiz AI generates and grades questions from AI knowledge or uploaded material.
+
+The Game Master coordinates the adventure; the API layer decides which AI to call for each user action.
 
 ---
-## Engineering Bottlenecks
-### 1. External LLM latency and rate limits
 
-The backend is **I/O-bound**: most request time waits on OpenRouter, Gemini, or OpenAI. Game initialization alone may invoke the Game World Agent, Game Master, State Controller, and NPC Agent in sequence—often **10–30+ seconds** on cold paths.
+## Challenges & How They Were Handled
 
-**Mitigations implemented:** OpenRouter prompt caching, dedicated init agents (tool-free paths to avoid extra LLM round-trips), character-chunk SSE streaming for perceived responsiveness, `select_model_with_fallback()` for resilient model selection.
-
-### 2. Multi-step game initialization
-
-Each new Mediquest session triggers world creation, case generation, and NPC batch generation. This is inherently expensive and difficult to parallelize fully because later steps depend on earlier outputs.
-
-**Mitigations:** Redis session cache returns quickly after init; init payload cached in `sessionStorage` on the client to skip re-fetch; background DB persist so HTTP response is not blocked.
-
-
-### 3. Document processing spikes
-
-Uploading and chunking PDFs/DOCX/PPT is **CPU- and memory-intensive** (100–300 MB per heavy request per internal capacity docs).
-
-**Mitigations:** 2-hour expiry for free-tier documents, cleanup worker on startup, lazy tutor agent init so model errors do not crash the entire app.
+| Challenge | Why it mattered | Approach |
+|-----------|-----------------|----------|
+| **Slow AI responses** | Game setup can take 15–45 seconds | Cache sessions, stream chat word-by-word, reuse init data in the browser |
+| **Many steps to start a game** | Each step depends on the last | Save state early; don’t block the user while writing to the database |
+| **Website and server out of sync** | Broken buttons when incomplete data was sent | Keep a full copy of game data on the server; merge carefully on each action |
+| **Heavy document uploads** | Large PDFs use a lot of memory | Auto-delete temp files; process uploads in the background where possible |
+| **Demo users vs registered users** | Anonymous IDs broke database saves | Store demos in cache only; full accounts use the database |
 
 ---
 
 ## Trade-offs
 
-| Decision | Benefit | Cost |
-|----------|---------|------|
-| **Multi-agent vs single agent** | Clear prompts, modular testing, per-agent models | Higher init latency, more moving parts |
-| **Pydantic-strict game state** | Type safety, fewer silent data bugs | Client must send complete backend fields |
-| **Redis cache** | Fast session reads, demo support | Optional dependency; cache/DB can diverge briefly |
-| **BYOK** | User cost control, model choice | Encryption key management; support burden |
-| **SSE streaming** | Responsive chat UX | Harder error handling |
-| **Concise generation prompts** | Faster tokens, cleaner UI | Less narrative richness per case |
+| Choice | Upside | Downside |
+|--------|--------|----------|
+| Multiple AI roles | Clearer behavior, easier to improve one part | Slower first load, more code to maintain |
+| Strict game data rules | Fewer silent bugs | More care needed when updating the UI |
+| User-provided AI keys | Lower cost for power users, model choice | More setup and support |
+| Streaming chat | Feels responsive | Harder to handle errors mid-stream |
+| Shorter AI prompts | Faster, cleaner UI text | Less detail per scenario |
 
 ---
 
+## Quality & Testing
 
-```bash
-pip install -r tests/ai_tests/requirements-ai.txt
-pytest tests/ai_tests -v
-```
-## Performance expectations (indicative)
+| Area | Status |
+|------|--------|
+| Mediquest (play, chat, clues, scoring) | Built and iteratively fixed |
+| Study mode (upload + chat) | Built |
+| Quiz mode | Built |
+| Accounts, dashboard, encrypted API keys | Built |
+| Demo mode | Built |
 
-From internal capacity analysis (`python_backend/about/capacity-and-scaling.md`):
+Automated tests hit a running API (`tests/ai_tests/`). Manual checks cover demo flow, login, document study, and error messages shown to users.
 
-- Light API: tens of ms (excluding LLM)
-- Agent call: 2–10 s per LLM round-trip
-- Game init: often 15–45 s depending on model and provider
-- Document upload/process: seconds to minutes by file size
+**Rough performance (typical):**
+
+- Simple API calls: under a second (excluding AI)
+- AI reply: a few seconds per message
+- New game setup: often 15–45 seconds depending on provider
+
+---
+
+## Academic & Professional Context
+
+Stud applies **serious games** and **formative assessment** ideas to medical training:
+
+- **Situated learning** — cases happen inside a believable clinical setting, not isolated trivia.
+- **Feedback loops** — each case yields a score, strengths, and areas to improve.
+- **Adaptive difficulty** — scenarios evolve based on answers and time.
+
+Built as a full-stack product combining clinical education goals with modern AI and web engineering.
+
+Deeper technical write-ups live in `python_backend/about/` (workflows, scaling notes, document-driven game design).
 
 ---
 
 ## Tech Stack
 
-| Layer | Technologies |
-|-------|----------------|
-| **Frontend** | Next.js 16, React 18, TypeScript, Tailwind CSS, Radix UI, Framer Motion |
-| **Backend** | FastAPI, Pydantic v2, Pydantic-AI, Uvicorn/Gunicorn |
-| **AI** | OpenRouter, Google Gemini, OpenAI (user-selectable) |
-| **Data** | Supabase (PostgreSQL), Redis, pgvector / Pinecone |
-| **Auth** | JWT, bcrypt, Fernet encryption |
-| **Infra** | Docker Compose, optional AWS S3 |
+| Layer | Tools (for recruiters who scan stacks) |
+|-------|----------------------------------------|
+| **Frontend** | Next.js, React, TypeScript, Tailwind CSS |
+| **Backend** | Python, FastAPI |
+| **AI** | Google Gemini, OpenAI, OpenRouter (pluggable) |
+| **Data** | Supabase (PostgreSQL), Redis |
+| **Auth & security** | JWT login, bcrypt passwords, encrypted API keys |
+| **DevOps** | Docker Compose |
 
 ---
 
@@ -201,57 +196,37 @@ From internal capacity analysis (`python_backend/about/capacity-and-scaling.md`)
 
 ```
 Stud/
-├── frontend/                 # Next.js app (run dev server here)
-│   ├── app/
-│   │   ├── mediquest/        # Game UI
-│   │   ├── demo/             # Demo launcher
-│   │   ├── study/            # Document chat
-│   │   ├── quiz/             # Quiz mode
-│   │   ├── dashboard/        # User hub
-│   │   └── api/              # BFF proxy routes
-│   └── app/lib/              # game-state.ts, proxy.ts, auth.ts
-├── python_backend/
-│   ├── agents/               # AI agents
-│   ├── api/                  # FastAPI routers
-│   ├── models/               # Pydantic state models
-│   ├── service/              # DB, Redis, crypto, documents
-│   ├── about/                # Architecture & workflow docs
-│   └── db/scripts/           # SQL migrations
-└── tests/ai_tests/           # Integration tests vs live API
+├── frontend/          # Website (game, study, quiz, dashboard)
+├── python_backend/    # API, AI agents, database services
+│   ├── agents/        # Specialized AI modules
+│   ├── api/           # HTTP endpoints
+│   └── about/         # Detailed design docs
+└── tests/ai_tests/    # API integration tests
 ```
 
 ---
 
 ## Quick Start
 
-### Prerequisites
+**Prerequisites:** Node.js 18+, Python 3.11+, Docker (recommended), Supabase + AI API keys.
 
-- Node.js 18+
-- Python 3.11+
-- Docker (recommended for backend + Redis)
-- Supabase project and LLM API keys
-
-### Backend (Docker)
-
+**Backend:**
 ```bash
 cd python_backend
-cp .env.example .env   # configure SUPABASE_*, SECRET_KEY, model keys etc
+cp .env.example .env
 docker-compose -f docker-compose.local.yml up
-# API → http://localhost:8000/docs
 ```
 
-### Frontend
-
+**Frontend:**
 ```bash
 cd frontend
 npm install
-# .env.local: PYTHON_BACKEND_URL=http://localhost:8000
 npm run dev
-# App → http://localhost:3000
 ```
 
-### Run tests
+Open `http://localhost:3000` — API docs at `http://localhost:8000/docs`.
 
+**Tests:**
 ```bash
 pip install -r tests/ai_tests/requirements-ai.txt
 pytest tests/ai_tests -v
@@ -259,3 +234,6 @@ pytest tests/ai_tests -v
 
 ---
 
+## License
+
+Proprietary — All rights reserved.
