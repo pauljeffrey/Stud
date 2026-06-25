@@ -130,7 +130,7 @@ Stud uses a **specialized multi-agent architecture** built on [Pydantic-AI](http
 | **Quiz Agent** | `agents/quiz_agent.py` | Quiz generation and open-ended scoring |
 | **File Parser Agent** | `agents/file_parser_agent.py` | Extract text from uploaded documents |
 
-Models are resolved per agent via `agents/agents.py` (`get_game_master_model`, `get_npc_model`, etc.), with **user BYOK** or **system fallback** through `select_model_with_fallback()` in `model.py`.
+Models are resolved per agent via `agents/agents.py` (`get_game_master_model`, `get_npc_model`, etc.).
 
 ---
 ## Engineering Bottlenecks
