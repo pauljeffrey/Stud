@@ -421,22 +421,22 @@ def process_chat_history(
 def process_chat_history_for_model_inference(
     messages: Union[
         Dict[str, Any],
-        List[Dict[str, Any]], 
-        List[List[Dict[str, Any]]]
-    ]) -> List[Union[ModelRequest, ModelResponse]]:
+        List[Dict[str, Any]],
+        List[List[Dict[str, Any]]],
+        List[Union[ModelRequest, ModelResponse]],
+    ]
+) -> List[Union[ModelRequest, ModelResponse]]:
     """
     Preprocess chat_history retrieved from database (old chat history sessions).
     Converts DB schema format to Pydantic-AI ModelMessage format for inference.
-    
-    Args:
-        messages: Chat history from DB (chat_history table schema)
-        
-    Returns:
-        List of ModelRequest/ModelResponse objects ready for model inference
     """
     if not messages:
         return []
-    
+
+    # Already in pydantic-ai message form — skip DB row conversion.
+    if isinstance(messages, list) and messages and isinstance(messages[0], (ModelRequest, ModelResponse)):
+        return messages
+
     # Handle single dict
     if isinstance(messages, dict):
         messages = [messages]

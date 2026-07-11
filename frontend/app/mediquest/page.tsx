@@ -40,6 +40,11 @@ import {
   readSseStream,
   toBackendPayload,
 } from "@/app/lib/game-state"
+import {
+  getSessionCredentials,
+  hasUsableCredentials,
+  toBackendModelFields,
+} from "@/app/lib/api-credentials"
 
 export default function MediquestPage() {
   return (
@@ -99,7 +104,7 @@ function MediquestPageContent() {
           .then((r) => r.json())
           .then((data) => {
             const s = data.settings || {}
-            if (s.provider || s.modelName || s.apiKey) {
+            if (hasUsableCredentials(s)) {
               setModelConfig({
                 provider: s.provider || "google",
                 model_name: s.modelName || "",
@@ -113,7 +118,7 @@ function MediquestPageContent() {
           const stored = localStorage.getItem("apiSettings") || localStorage.getItem("api_settings")
           if (stored) {
             const s = JSON.parse(stored)
-            if (s?.provider || s?.modelName || s?.apiKey) {
+            if (hasUsableCredentials(s)) {
               setModelConfig({
                 provider: s.provider || "google",
                 model_name: s.modelName || "",
@@ -171,6 +176,20 @@ function MediquestPageContent() {
     return () => clearInterval(timer)
   }, [caseKey, toast])
 
+  const persistGameCache = (raw: Record<string, unknown>, normalized: GameState) => {
+    if (typeof window === "undefined" || !gameId) return
+    sessionStorage.setItem(
+      `game_init_${gameId}`,
+      JSON.stringify({
+        success: true,
+        game_state: raw,
+        game_world: normalized.game_world,
+        case_state: normalized.case_state,
+        npc_states: normalized.npc_states,
+      })
+    )
+  }
+
   const syncFromResponse = (raw: Record<string, unknown>, prev: GameState | null) => {
     backendStateRef.current = mergeBackendFromResponse(backendStateRef.current, raw)
     const next = normalizeGameState(raw, undefined, prev)
@@ -181,6 +200,7 @@ function MediquestPageContent() {
         setTimeRemaining(timeRemainingRef.current)
       }
     }
+    persistGameCache(raw, next)
     return next
   }
 
@@ -188,7 +208,15 @@ function MediquestPageContent() {
     gameState ? toBackendPayload(backendStateRef.current, gameState) : null
 
   const apiModelFields = () => {
-    const fields: Record<string, string> = { provider: modelConfig.provider }
+    const session = getSessionCredentials()
+    const fields: Record<string, string> = {
+      provider: session?.provider || modelConfig.provider,
+    }
+    const modelName = session?.modelName || modelConfig.model_name
+    const apiKey = session?.apiKey || modelConfig.api_key
+    if (modelName && apiKey && hasUsableCredentials({ provider: fields.provider, modelName, apiKey })) {
+      return toBackendModelFields({ provider: fields.provider, modelName, apiKey })
+    }
     if (modelConfig.model_name) fields.model_name = modelConfig.model_name
     if (modelConfig.api_key) fields.api_key = modelConfig.api_key
     return fields
@@ -199,6 +227,11 @@ function MediquestPageContent() {
     introDismissedRef.current = false
     setShowIntro(true)
     setScenarioOpen(false)
+    setShowAnswer(false)
+    setShowClue(false)
+    setShowReason(false)
+    setSelectedOption("")
+    setUserAnswer("")
   }, [caseKey])
 
   const dismissIntro = () => {

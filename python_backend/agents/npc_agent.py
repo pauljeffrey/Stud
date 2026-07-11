@@ -22,6 +22,24 @@ from utils import (
 from typing import Union
 
 
+def _dump_json(value) -> str:
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json")
+    return json.dumps(value or {}, indent=2)
+
+
+def finalize_npc_states(npc_states: List[NPCState], case_state: CaseState) -> List[NPCState]:
+    """Ensure NPC ids and case linkage after generation."""
+    if not isinstance(npc_states, list):
+        npc_states = [npc_states] if isinstance(npc_states, NPCState) else []
+    for npc in npc_states:
+        if not getattr(npc, "npc_id", None):
+            npc.npc_id = str(uuid.uuid4())
+        if not getattr(npc, "case_id", None):
+            npc.case_id = case_state.case_id
+    return npc_states
+
+
 class NPCAgent:
     """
     NPC Agent responsible for creating and managing non-playable characters
@@ -116,7 +134,7 @@ class NPCAgent:
         - Description: {case_state.clinical_case_scenario_description}
         - Diagnosis: {case_state.diagnosis or "Being investigated"}
         - Question: {case_state.question}
-        - Investigations: {json.dumps(case_state.investigations or {}, indent=2)}
+        - Investigations: {_dump_json(case_state.investigations)}
         
         Game World Context:
         - Profession: {case_state.profession}
@@ -147,15 +165,8 @@ class NPCAgent:
             result = await self.npc_generator_agent.run(prompt)
             npc_states = result.output
             
-            # Ensure it's a list
             if isinstance(npc_states, list):
-                # Set common fields for all NPCs
-                for npc in npc_states:
-                    if not hasattr(npc, 'npc_id') or not npc.npc_id:
-                        npc.npc_id = str(uuid.uuid4())
-                    if not hasattr(npc, 'case_id') or not npc.case_id:
-                        npc.case_id = case_state.case_id
-                return npc_states
+                return finalize_npc_states(npc_states, case_state)
             elif isinstance(npc_states, NPCState):
                 # Single NPC returned, wrap in list
                 npc_states.npc_id = str(uuid.uuid4())

@@ -15,7 +15,13 @@ import uuid
 logger = logging.getLogger(__name__)
 
 from models.states import GameState, GameConfig, CaseState, PerformanceAnalysis, Achievement, UserDetails
-from api.game_state_utils import parse_client_game_state
+from models.api_requests import (
+    SaveCheckpointRequest,
+    MigrateDemoGameRequest,
+    CheckpointListResponse,
+    summarize_checkpoint_row,
+)
+from api.game_state_utils import parse_client_game_state, find_npc
 from agents.game_world_agent import get_game_world_agent
 from agents.game_master import get_game_master_agent
 from agents.npc_agent import get_npc_agent
@@ -217,15 +223,14 @@ async def initialize_game(
         # Get user ID from session or create demo session ID
         user_id = None
         if request.is_demo:
-            # For demo, use session-based ID (from request headers or generate)
-            # This allows multiple demo users without conflicts
             import hashlib
-            from fastapi import Request
-            # In a real implementation, get session ID from request headers or cookies
-            # For now, generate a demo session ID
-            demo_session_id = request.model_dump().get("session_id") or f"demo_{hashlib.md5(str(datetime.now()).encode()).hexdigest()[:8]}"
+
+            raw_session = request.session_id or hashlib.md5(
+                str(datetime.now()).encode()
+            ).hexdigest()[:8]
+            demo_session_id = raw_session.removeprefix("demo_")
             user_id = f"demo_{demo_session_id}"
-            
+
             # Check if this demo session already has a game
             try:
                 redis_conn = await get_redis()
@@ -236,7 +241,9 @@ async def initialize_game(
                             status_code=400,
                             detail="Demo game already exists for this session. Please register for full access."
                         )
-            except Exception as e:
+            except HTTPException:
+                raise
+            except Exception:
                 # If Redis fails, check database
                 try:
                     existing_demo = await _sb(
@@ -264,12 +271,34 @@ async def initialize_game(
                     detail="Authentication required to start a registered game",
                 )
         
-        # Get game master agent (singleton pattern - reuses instance)
+        # Resolve AI credentials: demo may fall back to platform .env; registered users must supply valid keys
+        from service.model_credentials import resolve_game_credentials
+
         try:
-            game_master = get_game_master_agent(
+            resolved_creds = resolve_game_credentials(
+                is_demo=request.is_demo,
                 model_name=request.model_name,
                 api_key=request.api_key,
-                provider=request.provider or "google"
+                provider=request.provider or "google",
+            )
+        except ValueError as cred_err:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "INVALID_API_CREDENTIALS",
+                    "message": str(cred_err),
+                },
+            )
+
+        # Fresh agent instance so per-request credentials are honoured
+        import agents.game_master as gm_module
+        gm_module._game_master_instance = None
+
+        try:
+            game_master = get_game_master_agent(
+                model_name=resolved_creds.model_name,
+                api_key=resolved_creds.api_key,
+                provider=resolved_creds.provider,
             )
         except Exception as e:
             logger.exception("Failed to initialize game master agent")
@@ -366,13 +395,16 @@ async def initialize_game(
                 logger.exception("Background DB persist failed for game %s", game_state.game_id)
 
         asyncio.create_task(_persist_to_db())
-        
+
+        await _cache_game_state(game_state)
+
         return {
             "success": True,
             "game_state": game_state.model_dump(mode="json"),
             "game_world": game_world.model_dump(mode="json"),
             "case_state": case_state.model_dump(mode="json"),
-            "npc_states": [npc.model_dump(mode="json") for npc in npc_states]
+            "npc_states": [npc.model_dump(mode="json") for npc in npc_states],
+            "used_platform_default": resolved_creds.used_platform_default,
         }
         
     except HTTPException:
@@ -381,20 +413,49 @@ async def initialize_game(
         raise HTTPException(status_code=500, detail=f"Failed to initialize game: {str(e)}")
 
 
+def _resolve_chat_credentials(
+    model_name: Optional[str],
+    api_key: Optional[str],
+    provider: Optional[str],
+    *,
+    is_demo: bool,
+):
+    from service.model_credentials import resolve_game_credentials
+
+    return resolve_game_credentials(
+        is_demo=is_demo,
+        model_name=model_name,
+        api_key=api_key,
+        provider=provider or "google",
+    )
+
+
 @router.post("/game/master-chat")
 async def game_master_chat(request: GameMasterChatRequest):
     """Chat with the Game Master"""
     
     async def generate_response():
         try:
-            # Parse game state
             game_state = parse_client_game_state(request.game_state)
-            
-            # Get game master agent
+            is_demo = bool(game_state.is_demo)
+
+            try:
+                creds = _resolve_chat_credentials(
+                    request.model_name,
+                    request.api_key,
+                    request.provider,
+                    is_demo=is_demo,
+                )
+            except ValueError as cred_err:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": "INVALID_API_CREDENTIALS", "message": str(cred_err)},
+                )
+
             game_master = get_game_master_agent(
-                model_name=request.model_name,
-                api_key=request.api_key,
-                provider=request.provider or "google"
+                model_name=creds.model_name,
+                api_key=creds.api_key,
+                provider=creds.provider,
             )
             
             # Get user_id and session_id from request or game_state
@@ -455,23 +516,34 @@ async def npc_chat(request: NPCChatRequest):
         try:
             # Parse game state
             game_state = parse_client_game_state(request.game_state)
-            
-            # Find NPC from case state's npc_states list
-            npc_states = game_state.case_state.npc_states or []
-            npc_state = None
-            for npc in npc_states:
-                if npc.npc_id == request.npc_id:
-                    npc_state = npc
-                    break
+            is_demo = bool(game_state.is_demo)
+
+            try:
+                creds = _resolve_chat_credentials(
+                    request.model_name,
+                    request.api_key,
+                    request.provider,
+                    is_demo=is_demo,
+                )
+            except ValueError as cred_err:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": "INVALID_API_CREDENTIALS", "message": str(cred_err)},
+                )
+
+            npc_state = find_npc(
+                (game_state.case_state.npc_states if game_state.case_state else None)
+                or request.game_state.get("npc_states"),
+                request.npc_id,
+            )
             
             if not npc_state:
                 raise HTTPException(status_code=404, detail="NPC not found")
             
-            # Get NPC agent
             npc_agent = get_npc_agent(
-                model_name=request.model_name,
-                api_key=request.api_key,
-                provider=request.provider or "google"
+                model_name=creds.model_name,
+                api_key=creds.api_key,
+                provider=creds.provider,
             )
             
             # Get user_id and session_id
@@ -596,6 +668,8 @@ async def update_case_state(request: UpdateCaseStateRequest):
             "handoff_occurred": game_state.case_state.n_changes >= game_state.case_state.max_clinical_changes
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update state: {str(e)}")
 
@@ -836,19 +910,13 @@ async def _analyze_performance(
 ) -> PerformanceAnalysis:
     """Analyze user performance for a case"""
     from pydantic_ai import Agent
-    from pydantic_ai.models.gemini import GeminiModel
-    from pydantic_ai.providers.google_gla import GoogleGLAProvider
-    from pydantic_ai.models.openai import OpenAIModel
-    
-    # Initialize model
-    if provider.lower() == "openai":
-        model = OpenAIModel(model_name or "gpt-4", api_key=api_key)
-    else:
-        model = GeminiModel(
-            model_name or "gemini-2.0-flash-exp",
-            provider=GoogleGLAProvider(api_key=api_key)
-        )
-    
+    from model import select_model_with_fallback
+    from configs.config import config
+
+    resolved_name = model_name or config.GAME_MASTER_MODEL_NAME or "nvidia/nemotron-3-nano-30b-a3b:free"
+
+    model, _ = select_model_with_fallback(resolved_name, api_key)
+
     agent = Agent(
         model,
         system_prompt="You are a medical education performance analyzer. Evaluate answers and provide scores (0-10) with detailed analysis.",
@@ -895,28 +963,36 @@ async def _analyze_performance(
 
 @router.post("/game/save")
 async def save_game(request: SaveGameRequest):
-    """
-    Save game state to Supabase
-    Note: This is redundant with /game/initialize which already saves the game.
-    Keeping for backward compatibility but consider using initialize endpoint instead.
-    """
+    """Persist game state to Supabase (registered users) or Redis (demo)."""
     try:
-        # Parse game state
         game_state = parse_client_game_state(request.game_state)
         user_id = request.user_id or game_state.user_id
-        
-        # Save to Supabase
+        is_demo = bool(game_state.is_demo or (user_id and str(user_id).startswith("demo_")))
+
+        await _cache_game_state(game_state)
+
+        if is_demo:
+            return {
+                "success": True,
+                "message": "Demo game cached successfully",
+                "game_state_id": game_state.game_id,
+            }
+
+        db_user_id = _valid_uuid(user_id)
+        if not db_user_id:
+            raise HTTPException(status_code=400, detail="Valid user_id required to save game")
+
         gs_payload = {
             "id": game_state.game_id,
-            "user_id": user_id,
+            "user_id": db_user_id,
             "case_id": game_state.case_id,
             "state": game_state.model_dump(mode="json"),
             "is_active": True,
-            "created_at": datetime.now().isoformat(),
+            "is_demo": False,
             "updated_at": datetime.now().isoformat(),
         }
         creation_payload = {
-            "user_id": user_id,
+            "user_id": db_user_id,
             "game_state_id": game_state.game_id,
             "scenario_type": "standard",
             "created_at": datetime.now().isoformat(),
@@ -938,57 +1014,158 @@ async def save_game(request: SaveGameRequest):
             return await _sb(_work)
 
         await _upsert_and_log()
-        
-        # Cache in Redis
-        redis_conn = await get_redis()
-        if redis_conn:
-            await redis_conn.setex(
-                f"gs:{game_state.game_id}",
-                3600,
-                json.dumps(game_state.model_dump(), default=str)
-            )
-        
+
         return {
             "success": True,
             "message": "Game saved successfully",
-            "game_state_id": game_state.game_id
+            "game_state_id": game_state.game_id,
         }
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.exception("save_game failed for game %s", getattr(request, "game_state", {}).get("game_id"))
         raise HTTPException(status_code=500, detail=f"Failed to save game: {str(e)}")
 
 
 @router.post("/game/save-checkpoint")
 async def save_checkpoint(
-    user_id: str,
-    game_state_id: str,
-    checkpoint_name: str,
-    checkpoint_id: Optional[str] = None,
-    description: Optional[str] = None
+    request: SaveCheckpointRequest,
+    authorization: Optional[str] = Header(None),
 ):
-    """Save a game checkpoint"""
+    """Save a game checkpoint for the authenticated user."""
+    from api.auth_deps import decode_jwt_user_id
+
+    user_id = _valid_uuid(decode_jwt_user_id(authorization))
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
     try:
-        # Get current game state
         game_state_result = await _sb(
-            lambda: supabase.table("game_states").select("*").eq("id", game_state_id).execute()
+            lambda: supabase.table("game_states")
+            .select("state")
+            .eq("id", request.game_state_id)
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
         )
         if not game_state_result.data:
             raise HTTPException(status_code=404, detail="Game state not found")
-        
-        checkpoint_id = checkpoint_id or f"checkpoint-{datetime.now().timestamp()}"
-        
-        checkpoint_payload = {
-            "user_id": user_id,
-            "game_state_id": game_state_id,
-            "checkpoint_id": checkpoint_id,
-            "checkpoint_name": checkpoint_name,
-            "state": game_state_result.data[0]["state"],
-            "description": description,
-            "created_at": datetime.now().isoformat(),
-        }
-        await _sb(
-            lambda: supabase.table("game_checkpoints").insert(checkpoint_payload).execute()
+
+        checkpoint_id = request.checkpoint_id or f"checkpoint-{datetime.now().timestamp()}"
+        state_snapshot = game_state_result.data[0]["state"]
+
+        db_service = get_database_service()
+        await db_service.create_checkpoint(
+            user_id=user_id,
+            game_state_id=request.game_state_id,
+            checkpoint_id=checkpoint_id,
+            checkpoint_name=request.checkpoint_name,
+            state=state_snapshot,
+            description=request.description,
         )
-        
+
         return {"success": True, "checkpoint_id": checkpoint_id}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save checkpoint: {str(e)}")
+
+
+@router.get("/game/checkpoints")
+async def list_checkpoints(authorization: Optional[str] = Header(None)):
+    """List all checkpoints for the authenticated user."""
+    from api.auth_deps import decode_jwt_user_id
+
+    user_id = _valid_uuid(decode_jwt_user_id(authorization))
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    try:
+        db_service = get_database_service()
+        rows = await db_service.list_user_checkpoints(user_id)
+        summaries = [summarize_checkpoint_row(row) for row in rows]
+        return CheckpointListResponse(checkpoints=summaries).model_dump(mode="json")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list checkpoints: {str(e)}")
+
+
+@router.delete("/game/checkpoints/{checkpoint_id}")
+async def delete_checkpoint(checkpoint_id: str, authorization: Optional[str] = Header(None)):
+    """Delete a checkpoint owned by the authenticated user."""
+    from api.auth_deps import decode_jwt_user_id
+
+    user_id = _valid_uuid(decode_jwt_user_id(authorization))
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    try:
+        db_service = get_database_service()
+        deleted = await db_service.delete_checkpoint(user_id, checkpoint_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Checkpoint not found")
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete checkpoint: {str(e)}")
+
+
+@router.post("/game/migrate-demo")
+async def migrate_demo_game(
+    request: MigrateDemoGameRequest,
+    authorization: Optional[str] = Header(None),
+):
+    """Attach a demo Redis session to a registered user account."""
+    from api.auth_deps import decode_jwt_user_id
+
+    user_id = _valid_uuid(decode_jwt_user_id(authorization))
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    demo_session_id = request.demo_session_id.removeprefix("demo_")
+    demo_user_id = f"demo_{demo_session_id}"
+
+    try:
+        redis_service = await get_redis_service()
+        session = await redis_service.get_game_session_state(demo_user_id, request.game_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Demo game state not found in cache")
+
+        state_payload = {
+            **session["game_state"],
+            "game_world": session["game_world"],
+            "case_state": session["case_state"],
+            "npc_states": session["npc_states"],
+        }
+        if session.get("previous_cases"):
+            state_payload["previous_cases"] = session["previous_cases"]
+
+        game_state = parse_client_game_state(state_payload)
+        game_state.user_id = user_id
+        game_state.is_demo = False
+        game_state.demo_limits = None
+
+        insert_payload = {
+            "id": game_state.game_id,
+            "user_id": user_id,
+            "case_id": game_state.case_id,
+            "state": game_state.model_dump(mode="json"),
+            "is_demo": False,
+            "is_active": True,
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+        }
+        await _sb(lambda: supabase.table("game_states").upsert(insert_payload, on_conflict="id").execute())
+        await _cache_game_state(game_state)
+
+        redis_conn = await get_redis()
+        if redis_conn:
+            await redis_conn.delete(f"dg:{demo_session_id}")
+
+        return {"success": True, "game_id": game_state.game_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to migrate demo game: {str(e)}")

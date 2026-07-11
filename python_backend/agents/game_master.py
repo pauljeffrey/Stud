@@ -24,12 +24,12 @@ from models.states import (
     GameState, GameWorldModel, CaseState, NPCState,
     Achievement, AchievementType, PerformanceAnalysis, GameConfig,
     ClinicalCaseMetadata, PreviousCases, DifficultyLevel,
-    UserDetails, GameStateUpdateOutput,
+    UserDetails, GameStateUpdateOutput, WorldGameInitOutput, CaseAndNpcsInitOutput,
 )
 from agents.achievement_subagent import generate_achievements as generate_achievements_agent
 from agents.game_world_agent import get_game_world_agent
 from agents.state_controller_agent import get_state_controller_agent
-from agents.npc_agent import get_npc_agent
+from agents.npc_agent import get_npc_agent, finalize_npc_states
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ModelRequest, UserPromptPart, SystemPromptPart
 from utils import (
     process_chat_history_for_model_inference,
@@ -41,6 +41,14 @@ from configs.config import config
 from utils import search_internet
 
 
+def _init_agent_options() -> dict:
+    from pydantic_ai.settings import ModelSettings
+    return {
+        "output_retries": config.INIT_OUTPUT_RETRIES,
+        "model_settings": ModelSettings(timeout=config.MODEL_TIMEOUT),
+    }
+
+
 @dataclass
 class ChatContext:
     """Dependencies for chat agent tools."""
@@ -49,19 +57,26 @@ class ChatContext:
     session_id: str
 
 
+def _case_field(case: Any, field: str, default: Any = "") -> Any:
+    """Read a field from CaseState or the dict form stored in PreviousCases."""
+    if isinstance(case, dict):
+        return case.get(field, default)
+    return getattr(case, field, default)
+
+
 def _case_to_dict(c: CaseState) -> str:
     """Serialize case state for tool output."""
     d = {
-        "case_state_id": getattr(c, "case_state_id", ""),
-        "scenario": getattr(c, "clinical_case_scenario_description", ""),
-        "question": getattr(c, "question", ""),
-        "diagnosis": getattr(c, "diagnosis", ""),
-        "answer": getattr(c, "answer", ""),
-        "reason_for_answer": getattr(c, "reason_for_answer", ""),
-        "clue": getattr(c, "clue", ""),
-        "n_changes": getattr(c, "n_changes", 0),
-        "max_clinical_changes": getattr(c, "max_clinical_changes", 0),
-        "clue_used": getattr(c, "clue_used", False),
+        "case_state_id": _case_field(c, "case_state_id", ""),
+        "scenario": _case_field(c, "clinical_case_scenario_description", ""),
+        "question": _case_field(c, "question", ""),
+        "diagnosis": _case_field(c, "diagnosis", ""),
+        "answer": _case_field(c, "answer", ""),
+        "reason_for_answer": _case_field(c, "reason_for_answer", ""),
+        "clue": _case_field(c, "clue", ""),
+        "n_changes": _case_field(c, "n_changes", 0),
+        "max_clinical_changes": _case_field(c, "max_clinical_changes", 0),
+        "clue_used": _case_field(c, "clue_used", False),
     }
     return json.dumps(d, indent=2)
 
@@ -78,10 +93,10 @@ def fetch_previous_cases(ctx: RunContext[ChatContext], n_chars: int=150) -> str:
     for i, c in enumerate(prev.cases, 1):
         out.append({
             "index": i,
-            "case_state_id": getattr(c, "case_state_id", ""),
-            "scenario_preview": (c.clinical_case_scenario_description or "")[:n_chars],
-            "question_preview": (c.question or "")[:n_chars],
-            "diagnosis": c.diagnosis or "N/A",
+            "case_state_id": _case_field(c, "case_state_id", ""),
+            "scenario_preview": (_case_field(c, "clinical_case_scenario_description", "") or "")[:n_chars],
+            "question_preview": (_case_field(c, "question", "") or "")[:n_chars],
+            "diagnosis": _case_field(c, "diagnosis", "") or "N/A",
         })
     return json.dumps(out, indent=2)
 
@@ -133,6 +148,55 @@ class GameMasterAgent:
             output_type=GameState,
             tools=[fetch_previous_cases]
         )
+
+        self.world_game_init_system_prompt = """
+            You initialize Stud in ONE response with two objects: game_world and game_state.
+
+            game_world (GameWorldModel) — concise immersive medical-education setting:
+            - world_description: 2-3 short sentences only
+            - hospital_name and department: brief labels
+            - additional_context: up to 4 one-line facts
+
+            game_state (GameState) — session state aligned with game_world and user:
+            - game_config must match the provided configuration
+            - case_metadata for case #1 with the requested difficulty
+            - current_case_number: 1
+            - total_cases from configuration
+            - diverse clinical case metadata for the user's profession/subject
+            """
+
+        self.case_npcs_init_system_prompt = """
+            You generate the first clinical case AND all NPCs for Stud in ONE response.
+
+            case_state (CaseState):
+            - clinical_case_scenario_description: 3-5 concise sentences
+            - question: one clear question
+            - clue, reason_for_answer: 1-2 sentences each
+            - investigations / scan_images: only essential findings, brief
+            - npc_roles: roles you will populate in npc_states
+            - medically accurate, educational, unique
+
+            npc_states (list of NPCState):
+            - One entry per role in case_state.npc_roles (add more if helpful)
+            - Appropriate name, age, gender, personality, tone, mood
+            - examination_findings for Patient role
+            - Characters must fit the case and game world
+            """
+
+        init_opts = _init_agent_options()
+        self.world_game_init_agent = Agent(
+            model,
+            system_prompt=self.world_game_init_system_prompt,
+            output_type=WorldGameInitOutput,
+            **init_opts,
+        )
+
+        self.case_npcs_init_agent = Agent(
+            model,
+            system_prompt=self.case_npcs_init_system_prompt,
+            output_type=CaseAndNpcsInitOutput,
+            **init_opts,
+        )
         
         # Chat agent will be initialized dynamically with game state context
         self.chat_agent = None
@@ -159,14 +223,14 @@ class GameMasterAgent:
             prev = getattr(gs, "previous_cases", None)
             past = list(prev.cases) if prev and getattr(prev, "cases", None) else []
             cur = getattr(gs, "case_state", None)
-            seen = {str(getattr(c, "case_state_id", "")) for c in past}
+            seen = {str(_case_field(c, "case_state_id", "")) for c in past}
             ordered: List[CaseState] = past[:]
-            if cur and str(getattr(cur, "case_state_id", "")) not in seen:
+            if cur and str(_case_field(cur, "case_state_id", "")) not in seen:
                 ordered.append(cur)
 
             if case_state_id:
                 for c in ordered:
-                    if c and str(getattr(c, "case_state_id", "")) == str(case_state_id):
+                    if c and str(_case_field(c, "case_state_id", "")) == str(case_state_id):
                         return _case_to_dict(c)
                 return json.dumps({"error": "case_state_id not found", "case_state_id": case_state_id})
 
@@ -288,6 +352,25 @@ class GameMasterAgent:
             output_type=Union[GameState, GameStateUpdateOutput],
             tools=[fetch_previous_cases]
         )
+        self.init_agent = Agent(
+            model,
+            system_prompt=self.game_master_system_prompt,
+            output_type=GameState,
+            tools=[fetch_previous_cases]
+        )
+        init_opts = _init_agent_options()
+        self.world_game_init_agent = Agent(
+            model,
+            system_prompt=self.world_game_init_system_prompt,
+            output_type=WorldGameInitOutput,
+            **init_opts,
+        )
+        self.case_npcs_init_agent = Agent(
+            model,
+            system_prompt=self.case_npcs_init_system_prompt,
+            output_type=CaseAndNpcsInitOutput,
+            **init_opts,
+        )
         self.chat_agent = None
         self.setup_tools()
     
@@ -339,30 +422,19 @@ class GameMasterAgent:
         initial_difficulty: Optional[DifficultyLevel] = None
     ) -> tuple:
         """
-        Initialize a new game adventure
-        
-        Args:
-            game_config: Game configuration
-            user_id: User ID
-            is_demo: Whether this is a demo game
-            initial_difficulty: Initial difficulty level (for demo mode selection)
-            
-        Returns:
-            Tuple of (game_world, game_state, case_state, npc_states, previous_cases)
+        Initialize a new game adventure (2 LLM calls: world+state, case+NPCs).
         """
-        # Create game world
-        game_world = await self.game_world_agent.create_world(game_config)
-        
-        # Initialize previous cases
+        game_config = self.game_world_agent._randomize_config(game_config.model_copy(deep=True))
+
         previous_cases = PreviousCases(
             cases=[],
             n_cases_generated=0,
             current_difficulty_level=initial_difficulty or DifficultyLevel.Easy
         )
-        
+
         user_performance: List[PerformanceAnalysis] = []
         difficulty_level = self._determine_difficulty_level(initial_difficulty, previous_cases, user_performance)
-        
+
         user_details_dict = (
             user_details.model_dump() if isinstance(user_details, UserDetails)
             else user_details if isinstance(user_details, dict)
@@ -371,13 +443,35 @@ class GameMasterAgent:
         if "user id" not in user_details_dict:
             user_details_dict["user id"] = user_id
 
-        result = await self.init_agent.run(f"""
-                                Game world: {json.dumps(game_world.model_dump(mode="json"))}
-                                User details: {json.dumps(user_details_dict)}
-                                Generate a game state for the game given the above.
-                                """)
-        
-        game_state = result.output
+        # Call 1: world + game state
+        try:
+            world_game_result = await self.world_game_init_agent.run(f"""
+                Create game_world and game_state for a new medical education adventure.
+
+                Configuration:
+                {json.dumps(game_config.model_dump(mode="json"))}
+
+                User details:
+                {json.dumps(user_details_dict)}
+
+                Target difficulty for case_metadata: {difficulty_level.value}
+                Set game_state.total_cases to {game_config.total_cases}.
+                Set game_state.current_case_number to 1.
+                """)
+        except Exception as e:
+            raise Exception(f"Failed to generate world and game state: {str(e)}")
+
+        init_output = world_game_result.output
+        game_world = init_output.game_world
+        game_state = init_output.game_state
+
+        if not game_world.world_id:
+            game_world.world_id = uuid.uuid4()
+
+        game_state.game_config = game_config
+        game_state.difficulty_level = difficulty_level
+        game_state.user_id = user_id
+
         if is_demo:
             game_state.is_demo = True
             game_state.total_cases = 6
@@ -387,39 +481,98 @@ class GameMasterAgent:
             })
             game_state.demo_limits = {"total_cases": 6, "max_clinical_changes": 6}
 
-        # Generate first clinical case
+        case_metadata = game_state.case_metadata
+        if case_metadata is None:
+            case_metadata = ClinicalCaseMetadata(
+                case_number=1,
+                profession=game_config.profession or "",
+                clinical_setting=game_config.clinical_setting or "",
+                subject=game_config.subject or "",
+                subtopic="",
+                diagnosis="",
+                difficulty_level=difficulty_level,
+            )
+            game_state.case_metadata = case_metadata
+        else:
+            case_metadata.difficulty_level = difficulty_level
+            case_metadata.case_number = 1
+
+        # Call 2: case + NPCs (fallback to split generation if combined output fails)
+        case_prompt = f"""
+                Generate clinical case #1 and all NPCs for this adventure.
+
+                Game configuration:
+                {json.dumps(game_config.model_dump(mode="json"))}
+
+                Game world:
+                {json.dumps(game_world.model_dump(mode="json"))}
+
+                Case metadata:
+                {json.dumps(case_metadata.model_dump(mode="json"))}
+
+                World description: {game_world.world_description}
+
+                Requirements:
+                - Relevant to {game_config.profession} practice
+                - Difficulty: {case_metadata.difficulty_level.value}
+                - Medically accurate and educational
+                - NPCs must match case_state.npc_roles and fit the world setting
+                """
         try:
+            case_npcs_result = await self.case_npcs_init_agent.run(case_prompt)
+            case_npcs_output = case_npcs_result.output
+            case_state = case_npcs_output.case_state
+            npc_states = finalize_npc_states(case_npcs_output.npc_states, case_state)
+        except Exception as combined_err:
+            logger.warning(
+                "Combined case+NPC init failed (%s); falling back to split generation",
+                combined_err,
+            )
             case_state, previous_cases = await self._generate_clinical_case(
                 game_config=game_config,
                 case_number=1,
                 user_id=user_id,
                 game_world=game_world,
-                case_metadata=game_state.case_metadata,
-                previous_cases=previous_cases
+                case_metadata=case_metadata,
+                previous_cases=previous_cases,
             )
-        except Exception as e:
-            raise Exception(f"Failed to generate first clinical case: {str(e)}")
+            npc_states = await self.npc_agent.generate_all_npcs_for_case(
+                case_state=case_state,
+                game_world=game_world,
+            )
 
         if case_state is None:
-            raise Exception("Clinical case generation returned None — state_controller produced no output")
+            raise Exception("Clinical case generation returned None")
+
+        if not getattr(case_state, "case_state_id", None):
+            case_state.case_state_id = str(uuid.uuid4())
+        if not getattr(case_state, "case_id", None):
+            case_state.case_id = game_state.case_id
+        case_state.user_id = user_id
+
+        if case_state.case_metadata is None:
+            case_state.case_metadata = ClinicalCaseMetadata(
+                case_number=1,
+                profession=game_config.profession or "",
+                clinical_setting=game_config.clinical_setting or "",
+                subject=game_config.subject or "",
+                subtopic="",
+                diagnosis=case_state.diagnosis or "Unknown",
+                difficulty_level=case_metadata.difficulty_level,
+            )
+
+        if previous_cases.n_cases_generated == 0:
+            previous_cases.add_case(case_state)
+        previous_cases.current_difficulty_level = case_metadata.difficulty_level
 
         if is_demo:
             case_state.max_clinical_changes = 3
-        
-        # Create NPCs for this case (all at once)
-        try:
-            npc_states = await self.npc_agent.generate_all_npcs_for_case(
-                case_state=case_state,
-                game_world=game_world
-            )
-            case_state.npc_states = npc_states
-        except Exception as e:
-            raise Exception(f"Failed to generate NPCs: {str(e)}")
+
+        case_state.npc_states = npc_states
 
         game_state.game_world = game_world
         game_state.case_state = case_state
         game_state.previous_cases = previous_cases
-        game_state.user_id = user_id
         return game_world, game_state, case_state, npc_states, previous_cases
         
     
@@ -440,10 +593,12 @@ class GameMasterAgent:
         if previous_cases:
             previous_cases_list = []
             for prev_case in previous_cases.cases:
+                scenario = _case_field(prev_case, "clinical_case_scenario_description", "") or ""
+                question = _case_field(prev_case, "question", "") or ""
                 previous_cases_list.append({
-                    "scenario": prev_case.clinical_case_scenario_description[:200],
-                    "diagnosis": prev_case.diagnosis or "Unknown",
-                    "question": prev_case.question[:200]
+                    "scenario": scenario[:200],
+                    "diagnosis": _case_field(prev_case, "diagnosis", "") or "Unknown",
+                    "question": question[:200],
                 })
             previous_cases_context = f"""
         
@@ -644,7 +799,7 @@ class GameMasterAgent:
             n_cases_generated=0,
             current_difficulty_level=game_state.difficulty_level,
         )
-        existing_ids = {c.case_state_id for c in previous_cases.cases}
+        existing_ids = {_case_field(c, "case_state_id", "") for c in previous_cases.cases}
         if game_state.case_state.case_state_id not in existing_ids:
             previous_cases.add_case(game_state.case_state)
 
@@ -660,20 +815,7 @@ class GameMasterAgent:
         # Generate next case if not at limit
         if game_state.current_case_number < game_state.total_cases:
             game_state.current_case_number += 1
-            
-            # Get previous cases from game state (should be managed externally)
-            # For now, create PreviousCases from current case
-            previous_cases = PreviousCases(
-                cases=[{
-                    "case_state_id": game_state.case_state.case_state_id,
-                    "clinical_case_scenario_description": game_state.case_state.clinical_case_scenario_description,
-                    "diagnosis": game_state.case_state.diagnosis,
-                    "question": game_state.case_state.question
-                    }],
-                n_cases_generated=game_state.current_case_number - 1,
-                current_difficulty_level=game_state.difficulty_level
-            )
-            
+
             case_metadata = game_state.case_metadata
             case_metadata.previous_cases_summary = previous_cases.get_summary_for_metadata()
             case_metadata.case_number = game_state.current_case_number

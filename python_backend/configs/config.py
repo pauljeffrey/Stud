@@ -17,7 +17,7 @@ class Config:
     TUTOR_MODEL_NAME=os.getenv("RAG_MODEL_NAME")
     STATE_CONTROLLER_MODEL_NAME = os.getenv("STATE_CONTROLLER_MODEL_NAME")
     QUIZ_MODEL_NAME=os.getenv("QUIZ_MODEL_NAME")
-    GAME_WORLD_MODEL_NAME=os.getenv("GAME_WORLD_MODEL_MODEL_NAME")
+    GAME_WORLD_MODEL_NAME=os.getenv("GAME_WORLD_MODEL_NAME") or os.getenv("GAME_WORLD_MODEL_MODEL_NAME")
     
     # Redis Configuration
     REDIS_URL = os.getenv("REDIS_URL")
@@ -36,6 +36,7 @@ class Config:
     # AI Configuration
     GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", None) 
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
+    OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY', '')
     
     # Application Settings
     SECRET_KEY = os.getenv("SECRET_KEY")
@@ -62,7 +63,8 @@ class Config:
     CONFIDENCE_SCORE_THRESHOLD = float(os.getenv('CONFIDENCE_SCORE_THRESHOLD', 0.5))
     
     MAX_TOKENS= int(os.getenv("MAX_TOKENS", "128000"))
-    AGENT_RESULT_RETRIES = int(os.getenv("AGENT_RESULT_RETRIES", "5"))
+    AGENT_RESULT_RETRIES = int(os.getenv("AGENT_RESULT_RETRIES", "2"))
+    INIT_OUTPUT_RETRIES = int(os.getenv("INIT_OUTPUT_RETRIES", "2"))
     SERPER_API_KEY = str(os.getenv('SERPER_API_KEY'))
     DATABASE_ENGINE = os.getenv("DATABASE_ENGINE", "supabase")  # Default to "supabase" for testing, or "mssql" for production
     AI_CHAT_ID = os.getenv("AI_CHAT_ID",)
@@ -81,9 +83,9 @@ class Config:
     REDIS_POOL_SIZE = int(os.getenv("REDIS_POOL_SIZE", "10"))  # Production: 10, Free tier: 3
     
     # Agent Timeout Configuration (Production defaults)
-    AGENT_TIMEOUT = float(os.getenv("AGENT_TIMEOUT", "60.0"))  # Production: 60s, Free tier: 30s
-    AGENT_SPECIFIC_TIMEOUT = float(os.getenv("AGENT_SPECIFIC_TIMEOUT", "55.0"))  # Slightly less than AGENT_TIMEOUT
-    MODEL_TIMEOUT = float(os.getenv("MODEL_TIMEOUT", "30.0"))  # Model-level timeout
+    AGENT_TIMEOUT = float(os.getenv("AGENT_TIMEOUT", "300.0"))
+    AGENT_SPECIFIC_TIMEOUT = float(os.getenv("AGENT_SPECIFIC_TIMEOUT", "280.0"))
+    MODEL_TIMEOUT = float(os.getenv("MODEL_TIMEOUT", "180.0"))
 
     # Document Mediquest: smaller persisted chunks; agents pull adjacent rows as needed
     DOCUMENT_CHUNK_WORDS = int(os.getenv("DOCUMENT_CHUNK_WORDS", "1000"))

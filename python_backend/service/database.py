@@ -196,6 +196,30 @@ class DatabaseService:
             return result.data or []
         return await asyncio.to_thread(_do)
 
+    async def list_user_checkpoints(self, user_id: str) -> List[Dict[str, Any]]:
+        def _do() -> List[Dict[str, Any]]:
+            result = (
+                self.client.table("game_checkpoints")
+                .select("*")
+                .eq("user_id", user_id)
+                .order("created_at", desc=True)
+                .execute()
+            )
+            return result.data or []
+        return await asyncio.to_thread(_do)
+
+    async def delete_checkpoint(self, user_id: str, checkpoint_id: str) -> bool:
+        def _do() -> bool:
+            result = (
+                self.client.table("game_checkpoints")
+                .delete()
+                .eq("user_id", user_id)
+                .eq("checkpoint_id", checkpoint_id)
+                .execute()
+            )
+            return bool(result.data)
+        return await asyncio.to_thread(_do)
+
     # ------------------------------------------------------------------
     # GAME STATISTICS OPERATIONS
     # ------------------------------------------------------------------

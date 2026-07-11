@@ -238,12 +238,12 @@ class GameConfig(BaseModel):
     dice_enabled: bool = Field(default=False, description="Toggle dice-roll mechanic on answer submission")
     
 
-class Options(Enum):
-    A: str = 'A'
-    B: str = 'B'
-    C: str = 'C'
-    D: str = 'D'
-    E:Optional[str] = 'E'
+class Options(str, Enum):
+    A = "A"
+    B = "B"
+    C = "C"
+    D = "D"
+    E = "E"
     
 class QuizQuestion(BaseModel, extra="allow"):    
     question: str
@@ -346,6 +346,19 @@ class GameState(CommonFields, extra='allow'):
     last_updated: datetime = Field(default_factory=datetime.now)
     is_demo: bool = Field(default=False)
     demo_limits: Optional[Dict[str, int]] = Field(default=None, description="Demo mode limits")
+
+
+class WorldGameInitOutput(BaseModel):
+    """Combined LLM output for init call 1: world + session game state."""
+    game_world: GameWorldModel
+    game_state: GameState
+
+
+class CaseAndNpcsInitOutput(BaseModel):
+    """Combined LLM output for init call 2: first clinical case + NPCs."""
+    case_state: CaseState
+    npc_states: List[NPCState]
+
 
 class DiceEffectRequest(BaseModel):
     game_state: GameState

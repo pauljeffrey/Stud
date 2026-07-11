@@ -5,7 +5,8 @@ Uses enhanced quiz agent with internet access and open-ended question support
 from fastapi import APIRouter, HTTPException, Header
 from typing import Optional, Dict, Any
 from agents.quiz_agent import get_quiz_agent
-from models.states import QuizQuestion
+from models.states import QuizQuestion, DifficultyLevel
+from models.api_requests import ScoreOpenAnswerRequest
 from service.redis_service import get_redis_service
 from service.database import get_database_service
 from api.auth_deps import resolve_user_id
@@ -246,45 +247,34 @@ async def submit_quiz(
 
 
 @router.post("/quiz/score-open")
-async def score_open_ended(request: Dict[str, Any]):
-    """
-    Score an open-ended quiz answer using AI
-    
-    Request body:
-    - question: str
-    - correct_answer: str
-    - user_answer: str
-    - explanation: Optional[str]
-    - model_name: Optional[str]
-    - api_key: Optional[str]
-    - provider: "google" | "openai"
-    """
+async def score_open_ended(request: ScoreOpenAnswerRequest):
+    """Score an open-ended quiz answer using AI."""
     try:
-        from models.states import DifficultyLevel
-        
         question = QuizQuestion(
-            question=request.get("question", ""),
+            question=request.question,
             type="open_ended",
-            correct_answer=request.get("correct_answer", ""),
-            explanation=request.get("explanation", ""),
-            difficulty_level=DifficultyLevel.Medium
+            correct_answer=request.correct_answer,
+            explanation=request.explanation or "",
+            difficulty_level=DifficultyLevel.Medium,
         )
 
         quiz_agent = get_quiz_agent(
-            model_name=request.get("model_name"),
-            api_key=request.get("api_key"),
-            provider=request.get("provider", "google")
+            model_name=request.model_name,
+            api_key=request.api_key,
+            provider=request.provider or "google",
         )
-        
+
         score_result = await quiz_agent.score_open_ended_answer(
             question=question,
-            user_answer=request.get("user_answer", ""),
-            model_name=request.get("model_name"),
-            api_key=request.get("api_key"),
-            provider=request.get("provider", "google")
+            user_answer=request.user_answer,
+            model_name=request.model_name,
+            api_key=request.api_key,
+            provider=request.provider or "google",
         )
 
         return score_result.model_dump(mode="json")
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to score answer: {str(e)}")

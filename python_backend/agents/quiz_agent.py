@@ -15,6 +15,7 @@ from datetime import datetime
 
 from configs.config import config
 from model import select_model
+from agents.agents import get_quiz_model
 from models.states import Quiz, QuizQuestion, OpenEndedAnswer, DifficultyLevel
 from utils import search_internet
 from service.document_processor import get_document_processor
@@ -48,10 +49,7 @@ class QuizAgent:
         self._model_name = model_name
         self._api_key = api_key
 
-        model, _ = select_model(
-            self._model_name or getattr(config, 'QUIZ_MODEL_NAME', None) or "gemini-2.0-flash",
-            self._api_key or getattr(config, 'API_KEY', None) or ""
-        )
+        model = get_quiz_model(self._model_name, self._api_key)
         
         self.system_prompt = """
         You are a medical education expert creating quiz questions.
@@ -92,10 +90,7 @@ class QuizAgent:
         )
 
         # Refine sub-agent for question quality improvement
-        refine_model, _ = select_model(
-            getattr(config, 'QUIZ_MODEL_NAME', None) or "gemini-2.0-flash",
-            getattr(config, 'API_KEY', None) or ""
-        )
+        refine_model = get_quiz_model(self._model_name, self._api_key)
         self._refine_agent = Agent(
             refine_model,
             system_prompt="You are a medical education expert. Refine quiz questions for clarity, accuracy, and educational value. Preserve question structure (type, options, correct_answer). Return refined questions in the same order.",
@@ -113,15 +108,16 @@ class QuizAgent:
             self._api_key = api_key
 
         resolved_model = self._model_name or getattr(config, 'QUIZ_MODEL_NAME', None) or "gemini-2.0-flash"
-        resolved_key = self._api_key or getattr(config, 'API_KEY', None) or ""
-        model, _ = select_model(resolved_model, resolved_key)
+        model = get_quiz_model(resolved_model, self._api_key)
 
         tools = []
         if self.use_internet:
+            search_key = self._api_key or config.OPENROUTER_API_KEY or ""
+
             @Agent.tool
             async def search_web(query: str) -> str:
                 """Search the internet for current medical information"""
-                return await search_internet(query, resolved_key)
+                return await search_internet(query, search_key)
             tools.append(search_web)
 
         self.agent = Agent(
@@ -888,9 +884,9 @@ class QuizAgent:
         """
         # Initialize scoring agent if not exists or if model changed
         if self.scoring_agent is None or model_name or api_key:
-            scoring_model, _ = select_model(
-                model_name or self.model_name or getattr(config, 'QUIZ_MODEL_NAME', None) or "gemini-2.0-flash-exp",
-                api_key or self.api_key or getattr(config, 'API_KEY', None) or ""
+            scoring_model = get_quiz_model(
+                model_name or self.model_name,
+                api_key or self.api_key,
             )
             self.scoring_agent = Agent(
                 scoring_model,

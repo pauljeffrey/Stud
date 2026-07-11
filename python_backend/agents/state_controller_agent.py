@@ -18,6 +18,12 @@ from models.states import CaseState, PerformanceAnalysis, StateChangeResponse, C
 logger = logging.getLogger(__name__)
 
 
+def _dump_json(value) -> str:
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json")
+    return json.dumps(value or {})
+
+
 def _state_controller_tool_fns(ctrl: "StateControllerAgent"):
     async def compute_escalation_intensity(
         ctx: RunContext[None],
@@ -146,7 +152,6 @@ class StateControllerAgent:
         - Profession: {case_metadata.profession}
         - Clinical Setting: {case_metadata.clinical_setting}
         - Subject: {case_metadata.subject}
-        - Era: {case_metadata.era}
         - Difficulty Level: {case_metadata.difficulty_level}
 
         IMPORTANT: The difficulty level is {case_metadata.difficulty_level}.
@@ -162,8 +167,8 @@ class StateControllerAgent:
         - Case ID: {current_case_state.case_state_id}
         - Scenario: {current_case_state.clinical_case_scenario_description[:500]}
         - Current Diagnosis: {current_case_state.diagnosis or 'Not yet diagnosed'}
-        - Examination Findings: {json.dumps(current_case_state.investigations or {})}
-        - Investigation Results: {json.dumps(current_case_state.scan_images or {})}
+        - Examination Findings: {_dump_json(current_case_state.investigations)}
+        - Investigation Results: {_dump_json(current_case_state.scan_images)}
         - Number of Changes: {current_case_state.n_changes} out of {current_case_state.max_clinical_changes}
         - Time Elapsed: {time_elapsed} seconds
         - Time Remaining: {current_case_state.time_remaining_seconds} seconds

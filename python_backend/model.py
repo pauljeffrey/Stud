@@ -1,16 +1,19 @@
 from pydantic_ai import Agent
-from pydantic_ai.models.gemini import GeminiModel
-from pydantic_ai.providers.google_gla import GoogleGLAProvider
+from pydantic_ai.models.google import GoogleModel
+from pydantic_ai.providers.google import GoogleProvider
 from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.providers.anthropic import AnthropicProvider
-from pydantic_ai.models.openai import OpenAIModel, OpenAIChatModel
+from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.models.openrouter import OpenRouterModel, OpenRouterModelSettings
 from pydantic_ai.providers.openrouter import OpenRouterProvider
+from pydantic_ai.settings import ModelSettings
 
 from dotenv import load_dotenv
 import logging
 import os
+
+from service.model_credentials import validate_user_credentials
 
 load_dotenv()
 
@@ -27,7 +30,12 @@ _DEFAULT_OR_SETTINGS = OpenRouterModelSettings(
     openrouter_cache_instructions=True,
     openrouter_cache_messages=True,
     openrouter_cache_tool_definitions=True,
+    timeout=float(os.getenv("MODEL_TIMEOUT", "180")),
 )
+
+
+def _base_model_settings() -> ModelSettings:
+    return ModelSettings(timeout=float(os.getenv("MODEL_TIMEOUT", "180")))
 
 _DEFAULT_MODEL = "nvidia/nemotron-3-nano-30b-a3b:free"
 
@@ -59,22 +67,25 @@ def select_model(MODEL_NAME, API_KEY):
             settings=_DEFAULT_OR_SETTINGS,
         )
     elif 'gemini' in MODEL_NAME_LOWER:
-        model = GeminiModel(
-            MODEL_NAME, provider=GoogleGLAProvider(api_key=GOOGLE_API_KEY)
+        gemini_key = API_KEY or GOOGLE_API_KEY
+        model = GoogleModel(
+            MODEL_NAME, provider=GoogleProvider(api_key=gemini_key), settings=_base_model_settings()
         )
     elif 'claude' in MODEL_NAME_LOWER:
         model = AnthropicModel(
-            MODEL_NAME, provider=AnthropicProvider(api_key=API_KEY)
+            MODEL_NAME, provider=AnthropicProvider(api_key=API_KEY), settings=_base_model_settings()
         )
     elif 'gpt' in MODEL_NAME_LOWER or 'openai' in MODEL_NAME_LOWER:
-        model = OpenAIModel(
-            MODEL_NAME, provider=OpenAIProvider(api_key=OPENAI_API_KEY)
+        openai_key = API_KEY or OPENAI_API_KEY
+        model = OpenAIChatModel(
+            MODEL_NAME, provider=OpenAIProvider(api_key=openai_key), settings=_base_model_settings()
         )
     else:
-        # Unknown name — route through OpenRouter as a safe fallback
+        # Unknown name — route through OpenRouter; prefer the user's key when given
+        or_key = API_KEY or OPENROUTER_API_KEY
         model = OpenRouterModel(
             MODEL_NAME,
-            provider=OpenRouterProvider(api_key=OPENROUTER_API_KEY),
+            provider=OpenRouterProvider(api_key=or_key),
             settings=_DEFAULT_OR_SETTINGS,
         )
 
@@ -91,24 +102,36 @@ def _system_default_model():
     )
 
 
-def select_model_with_fallback(user_model_name: str | None, user_api_key: str | None):
-    """Try the user-supplied model/key; fall back to the system default on any error.
-
-    This is the preferred entry point for agents that accept per-user model
-    configuration.  If the user's model initialises fine but fails at inference
-    time the calling agent should catch the exception and retry with
-    ``_system_default_model()``.
+def select_model_with_fallback(
+    user_model_name: str | None,
+    user_api_key: str | None,
+    *,
+    allow_platform_fallback: bool = True,
+):
+    """Try user model/key; optionally fall back to the system default.
 
     Returns:
         tuple: (model, agent)
     """
     if user_model_name and user_api_key:
-        try:
-            return select_model(user_model_name, user_api_key)
-        except Exception as exc:
-            logger.warning(
-                "User model '%s' failed to initialise (%s) — falling back to system default.",
-                user_model_name,
-                exc,
-            )
+        ok, reason = validate_user_credentials(user_model_name, user_api_key)
+        if ok:
+            try:
+                return select_model(user_model_name, user_api_key)
+            except Exception as exc:
+                if not allow_platform_fallback:
+                    raise ValueError(
+                        f"Could not initialise model '{user_model_name}'. Check the model name and API key."
+                    ) from exc
+                logger.warning(
+                    "User model '%s' failed to initialise (%s) — falling back to system default.",
+                    user_model_name,
+                    exc,
+                )
+        elif not allow_platform_fallback:
+            raise ValueError(reason)
+
+    if not allow_platform_fallback:
+        raise ValueError("Model name and API key are required.")
+
     return _system_default_model()

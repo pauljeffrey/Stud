@@ -11,6 +11,15 @@ import { Checkbox } from "@/app/components/ui/checkbox"
 import { ArrowRight, Sparkles, AlertCircle } from "lucide-react"
 import { motion, AnimatePresence } from "framer-motion"
 import { useToast } from "@/app/components/ui/use-toast"
+import { ApiKeySetupDialog } from "@/app/components/api-key-setup-dialog"
+import {
+  type ApiCredentials,
+  hasUsableCredentials,
+  parseApiErrorDetail,
+  setSessionCredentials,
+  toBackendModelFields,
+  validateCredentials,
+} from "@/app/lib/api-credentials"
 
 interface GameSettingsField {
   label: string
@@ -115,6 +124,18 @@ function InitProgressOverlay({ progress }: { progress: number }) {
   )
 }
 
+const DEMO_SESSION_KEY = "stud_demo_session_id"
+
+function getDemoSessionId(): string {
+  if (typeof window === "undefined") return ""
+  let id = localStorage.getItem(DEMO_SESSION_KEY)
+  if (!id) {
+    id = crypto.randomUUID()
+    localStorage.setItem(DEMO_SESSION_KEY, id)
+  }
+  return id
+}
+
 export default function DemoPage() {
   const router = useRouter()
   const { toast } = useToast()
@@ -142,6 +163,9 @@ export default function DemoPage() {
     provider: "google",
   })
   const [useRandomConfig, setUseRandomConfig] = useState(false)
+  const [showApiDialog, setShowApiDialog] = useState(false)
+  const [apiDialogError, setApiDialogError] = useState<string | undefined>()
+  const [pendingGameBody, setPendingGameBody] = useState<Record<string, unknown> | null>(null)
 
   // Animate progress bar while loading
   useEffect(() => {
@@ -180,9 +204,13 @@ export default function DemoPage() {
         .then((r) => r.json())
         .then((data) => {
           const s = data.settings || {}
-          const has = !!(s.provider || s.modelName || s.apiKey)
-          setHasApiSettings(has)
-          if (has) setSavedApiSettings(s)
+          if (hasUsableCredentials(s)) {
+            setHasApiSettings(true)
+            setSavedApiSettings(s)
+          } else if (s.provider || s.modelName || s.apiKey) {
+            setHasApiSettings(false)
+            setSavedApiSettings(null)
+          }
         })
         .catch(() => {})
     } else {
@@ -193,9 +221,10 @@ export default function DemoPage() {
             : null
         if (stored) {
           const parsed = JSON.parse(stored)
-          const has = !!(parsed?.provider || parsed?.modelName || parsed?.apiKey)
-          setHasApiSettings(has)
-          if (has) setSavedApiSettings(parsed)
+          if (hasUsableCredentials(parsed)) {
+            setHasApiSettings(true)
+            setSavedApiSettings(parsed)
+          }
         }
       } catch {
         setHasApiSettings(false)
@@ -211,6 +240,97 @@ export default function DemoPage() {
       })
       .catch(() => {})
   }, [])
+
+  const buildApiCredentials = (): Partial<ApiCredentials> | null => {
+    if (hasApiSettings && savedApiSettings) {
+      return {
+        provider: savedApiSettings.provider || "google",
+        modelName: savedApiSettings.modelName || "",
+        apiKey: savedApiSettings.apiKey || "",
+      }
+    }
+    if (formData.model_name || formData.api_key) {
+      return {
+        provider: formData.provider || "google",
+        modelName: formData.model_name || "",
+        apiKey: formData.api_key || "",
+      }
+    }
+    return null
+  }
+
+  const startGame = async (body: Record<string, unknown>) => {
+    const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
+    const headers: Record<string, string> = { "Content-Type": "application/json" }
+    if (token) headers["Authorization"] = `Bearer ${token}`
+
+    const response = await fetch("/api/game/initialize", {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    })
+
+    if (!response.ok) {
+      const error = await response.json()
+      const message = parseApiErrorDetail(error.detail)
+      if (!isLoggedIn && message.toLowerCase().includes("model")) {
+        throw new Error(message)
+      }
+      throw new Error(message || "Failed to initialize game")
+    }
+
+    const data = await response.json()
+
+    if (data.used_platform_default && !isLoggedIn) {
+      toast({
+        title: "Using Stud default model",
+        description:
+          "Your API settings were invalid or empty, so we used the platform model for this demo.",
+      })
+    }
+
+    setProgress(100)
+
+    if (typeof window !== "undefined" && data.game_state?.game_id) {
+      sessionStorage.setItem(`game_init_${data.game_state.game_id}`, JSON.stringify(data))
+    }
+
+    router.push(`/mediquest?game_id=${data.game_state.game_id}`)
+  }
+
+  const handleApiDialogComplete = async (creds: ApiCredentials, saveToAccount: boolean) => {
+    if (saveToAccount && isLoggedIn) {
+      const token = localStorage.getItem("token")
+      const res = await fetch("/api/user/settings", {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(creds),
+      })
+      if (!res.ok) throw new Error("Failed to save API settings")
+      setSavedApiSettings(creds)
+      setHasApiSettings(true)
+    } else {
+      setSessionCredentials(creds)
+    }
+
+    const base = pendingGameBody || {}
+    setLoading(true)
+    try {
+      await startGame({ ...base, ...toBackendModelFields(creds) })
+    } catch (error: unknown) {
+      toast({
+        title: "Error",
+        description: error instanceof Error ? error.message : "Failed to start game",
+        variant: "destructive",
+      })
+    } finally {
+      setLoading(false)
+      setPendingGameBody(null)
+    }
+  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -231,51 +351,47 @@ export default function DemoPage() {
         if (formData.economic_advantage) gameConfig.economic_advantage = formData.economic_advantage
       }
 
-      const apiConfig =
-        hasApiSettings && savedApiSettings
-          ? {
-              model_name: savedApiSettings.modelName || undefined,
-              api_key: savedApiSettings.apiKey || undefined,
-              provider: savedApiSettings.provider || "google",
-            }
-          : {
-              model_name: formData.model_name || undefined,
-              api_key: formData.api_key || undefined,
-              provider: formData.provider,
-            }
-
       const body: Record<string, unknown> = {
         game_config: gameConfig,
         is_demo: !isLoggedIn,
-        ...apiConfig,
       }
       if (isLoggedIn && user?.id) body.user_id = user.id
+      if (!isLoggedIn) body.session_id = getDemoSessionId()
 
-      const headers: Record<string, string> = { "Content-Type": "application/json" }
-      if (token) headers["Authorization"] = `Bearer ${token}`
+      const creds = buildApiCredentials()
 
-      const response = await fetch("/api/game/initialize", {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-      })
-
-      if (!response.ok) {
-        const error = await response.json()
-        throw new Error(error.detail || "Failed to initialize game")
+      if (isLoggedIn) {
+        if (!creds || !hasUsableCredentials(creds)) {
+          setLoading(false)
+          setPendingGameBody(body)
+          setApiDialogError(
+            creds
+              ? validateCredentials(creds).message
+              : "Add a model name and API key to start Mediquest."
+          )
+          setShowApiDialog(true)
+          return
+        }
+        // Logged-in with valid saved creds — offer save dialog only for fresh form entry
+        const fromForm = !!(formData.model_name && formData.api_key) && !hasApiSettings
+        if (fromForm) {
+          setLoading(false)
+          setPendingGameBody(body)
+          setApiDialogError(undefined)
+          setShowApiDialog(true)
+          return
+        }
+        Object.assign(body, toBackendModelFields(creds as ApiCredentials))
+        await startGame(body)
+        return
       }
 
-      const data = await response.json()
-
-      // Flash to 100% before navigating
-      setProgress(100)
-
-      // Cache full init payload so mediquest skips the re-fetch
-      if (typeof window !== "undefined" && data.game_state?.game_id) {
-        sessionStorage.setItem(`game_init_${data.game_state.game_id}`, JSON.stringify(data))
+      // Demo: send creds only if valid; otherwise backend uses platform default
+      if (creds && hasUsableCredentials(creds)) {
+        Object.assign(body, toBackendModelFields(creds as ApiCredentials))
       }
 
-      router.push(`/mediquest?game_id=${data.game_state.game_id}`)
+      await startGame(body)
     } catch (error: unknown) {
       toast({
         title: "Error",
@@ -418,7 +534,10 @@ export default function DemoPage() {
                               Optional: Use Your Own API Key
                             </p>
                             <p className="text-xs text-gray-400">
-                              Provide your own API key. Leave empty to use platform defaults.
+                              Provide your own API key. Leave empty to use platform defaults in demo.{" "}
+                              <a href="/api-keys" className="text-purple-400 underline hover:text-purple-300">
+                                How to get a key
+                              </a>
                             </p>
                           </div>
                         </div>
@@ -508,6 +627,21 @@ export default function DemoPage() {
           </Card>
         </motion.div>
       </div>
+
+      <ApiKeySetupDialog
+        open={showApiDialog}
+        onOpenChange={setShowApiDialog}
+        errorMessage={apiDialogError}
+        isLoggedIn={isLoggedIn}
+        initial={
+          buildApiCredentials() || {
+            provider: formData.provider,
+            modelName: formData.model_name,
+            apiKey: formData.api_key,
+          }
+        }
+        onComplete={handleApiDialogComplete}
+      />
     </div>
   )
 }

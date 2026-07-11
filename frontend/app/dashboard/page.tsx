@@ -936,6 +936,10 @@ export default function DashboardPage() {
                     </DialogContent>
                   </Dialog>
 
+                  <Button variant="link" className="text-purple-300 px-0" asChild>
+                    <a href="/api-keys">Full guide: model names &amp; API keys for all providers</a>
+                  </Button>
+
                   <div className="bg-purple-900/30 border border-purple-700/40 p-4 rounded-lg">
                     <h4 className="font-semibold mb-2 flex items-center gap-2 text-purple-300">
                       <Info className="h-4 w-4" />

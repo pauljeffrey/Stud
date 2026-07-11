@@ -60,7 +60,10 @@ def _allowed_origins() -> List[str]:
 def _verify_supabase() -> None:
     """Hit Supabase once, with backoff for cold-start (5xx) responses."""
     if not config.SUPABASE_URL or not config.SUPABASE_SERVICE_ROLE_KEY:
-        raise RuntimeError("SUPABASE_URL and SERVICE_ROLE_KEY are required")
+        if _cors_strict():
+            raise RuntimeError("SUPABASE_URL and SERVICE_ROLE_KEY are required")
+        logger.warning("Supabase credentials missing — auth and DB features disabled")
+        return
 
     db = get_database_service()
     delays = (2, 4, 8, 16, 32)
@@ -78,8 +81,18 @@ def _verify_supabase() -> None:
             last_err = e
             if any(code in err for code in ("520", "521", "522", "524")):
                 continue
-            raise
-    raise RuntimeError(f"Supabase unreachable after retries: {last_err}")
+            if _cors_strict():
+                raise
+            logger.warning(
+                "Supabase unreachable in dev mode (demo/cache still works): %s", last_err
+            )
+            return
+    if _cors_strict():
+        raise RuntimeError(f"Supabase unreachable after retries: {last_err}")
+    logger.warning(
+        "Supabase unreachable after retries in dev mode (demo/cache still works): %s",
+        last_err,
+    )
 
 
 async def _verify_redis() -> None:

@@ -94,7 +94,7 @@ services:
     pull_policy: build
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: dockerfile
     restart: unless-stopped
     depends_on:
       redis:
