@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 
 
 class ScoreOpenAnswerRequest(BaseModel):
@@ -26,6 +26,13 @@ class SaveCheckpointRequest(BaseModel):
 class MigrateDemoGameRequest(BaseModel):
     demo_session_id: str
     game_id: str
+
+
+class WaitlistRequest(BaseModel):
+    email: EmailStr
+    name: Optional[str] = None
+    note: Optional[str] = None
+    source_page: Optional[str] = None
 
 
 class CheckpointSummary(BaseModel):

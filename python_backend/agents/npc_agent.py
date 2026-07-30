@@ -4,6 +4,7 @@ Non-playable characters that help users identify symptoms and problems
 NPCs take on the character of the illness/condition provided by game master or state controller
 """
 import asyncio
+import logging
 from typing import Optional, List, Dict, Any
 from pydantic_ai import Agent
 import os
@@ -12,6 +13,7 @@ import random
 import uuid
 
 from configs.config import config
+from agents._shared import merge_credentials
 from agents.agents import get_npc_model
 from models.states import NPCState, CaseState, GameWorldModel, NPCRole
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ModelRequest, UserPromptPart, SystemPromptPart
@@ -21,6 +23,8 @@ from utils import (
 )
 from typing import Union
 
+logger = logging.getLogger(__name__)
+
 
 def _dump_json(value) -> str:
     if hasattr(value, "model_dump"):
@@ -28,15 +32,32 @@ def _dump_json(value) -> str:
     return json.dumps(value or {}, indent=2)
 
 
+def _common_fields_from_case(case_state: CaseState) -> dict:
+    """Copy CommonFields from case_state for NPC construction."""
+    return {
+        "user_id": getattr(case_state, "user_id", None) or "",
+        "case_id": case_state.case_id,
+        "profession": getattr(case_state, "profession", None),
+        "clinical_setting": getattr(case_state, "clinical_setting", None),
+        "subject": getattr(case_state, "subject", None),
+        "era": getattr(case_state, "era", None),
+        "natural_conditions": getattr(case_state, "natural_conditions", None),
+        "nation_type": getattr(case_state, "nation_type", None),
+        "economic_advantage": getattr(case_state, "economic_advantage", None),
+    }
+
+
 def finalize_npc_states(npc_states: List[NPCState], case_state: CaseState) -> List[NPCState]:
-    """Ensure NPC ids and case linkage after generation."""
+    """Ensure NPC ids, case linkage, and CommonFields after generation."""
     if not isinstance(npc_states, list):
         npc_states = [npc_states] if isinstance(npc_states, NPCState) else []
+    common = _common_fields_from_case(case_state)
     for npc in npc_states:
         if not getattr(npc, "npc_id", None):
             npc.npc_id = str(uuid.uuid4())
-        if not getattr(npc, "case_id", None):
-            npc.case_id = case_state.case_id
+        for field, value in common.items():
+            if value is not None and not getattr(npc, field, None):
+                setattr(npc, field, value)
     return npc_states
 
 
@@ -56,6 +77,10 @@ class NPCAgent:
             provider: "google" or "openai"
         """
         
+        self.model_name = model_name
+        self.api_key = api_key
+        self.provider = provider
+
         # Initialize agent using the pattern from agents.py
         model = get_npc_model(model_name, api_key)
         self.npc_system_prompt = """
@@ -97,8 +122,10 @@ class NPCAgent:
         )
     
     def _reinitialize_model(self, model_name: Optional[str] = None, api_key: Optional[str] = None):
-        """Reinitialize the model"""
-        
+        """Reinitialize with new user-provided credentials."""
+        self.model_name, self.api_key = merge_credentials(
+            self.model_name, self.api_key, model_name, api_key
+        )
         model = get_npc_model(self.model_name, self.api_key)
         self.agent = Agent(
             model,
@@ -168,17 +195,13 @@ class NPCAgent:
             if isinstance(npc_states, list):
                 return finalize_npc_states(npc_states, case_state)
             elif isinstance(npc_states, NPCState):
-                # Single NPC returned, wrap in list
-                npc_states.npc_id = str(uuid.uuid4())
-                # npc_states.user_id = case_state.user_id
-                npc_states.case_id = case_state.case_id
-                return [npc_states]
+                return finalize_npc_states([npc_states], case_state)
             else:
                 # Fallback: create at least a Patient NPC
                 return [self.create_npc_from_case(case_state, "Patient")]
         except Exception as e:
             # Fallback to creating NPCs manually if agent fails
-            print(f"NPC generation agent failed: {e}, using fallback method")
+            logger.warning(f"NPC generation agent failed: {e}, using fallback method")
             extra_roles = ['Patient', 'Specialist', 'Relative', 'Nurse']
             # Create extra NPCs in parallel
             extra_npcs = await asyncio.gather(
@@ -221,7 +244,6 @@ class NPCAgent:
 
         npc_state = NPCState(
             npc_id=str(uuid.uuid4()),
-            case_id=case_state.case_id,
             name=display_name,
             role=role_enum,
             age=str(random.randint(25, 75)),
@@ -232,10 +254,9 @@ class NPCAgent:
             tone=tone,
             mood=mood,
             available=True,
-            clue_level=0
+            clue_level=0,
+            **_common_fields_from_case(case_state),
         )
-        
-        # npc_state.user_id = case_state.user_id
         return npc_state
     
     def _role_to_npc_enum(self, role: str) -> NPCRole:
@@ -342,7 +363,7 @@ class NPCAgent:
         try:
             # Get AI response
             result = await agent.run(user_message, message_history=chat_history)
-            response = result
+            response = result.output
             
             # Update chat history
             if chat_history:
@@ -367,7 +388,7 @@ class NPCAgent:
             
             return response, chat_history
         except Exception as e:
-            print(f"NPC chat failed: {e}")
+            logger.exception(f"NPC chat failed: {e}")
             return "Sorry, I'm having trouble responding. Please try again later.", chat_history
 
     async def update_npcs_for_case(
@@ -406,7 +427,7 @@ NPCs: {json.dumps(compact, default=str)[:12000]}"""
                     }))
                 return merged
         except Exception as e:
-            print(f"update_npcs_for_case: {e}")
+            logger.warning(f"update_npcs_for_case: {e}")
         return npc_states
 
     def _generate_npc_name(self, role: str, gender: str = "Other") -> str:

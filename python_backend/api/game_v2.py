@@ -58,6 +58,22 @@ async def get_redis():
     return service.client
 
 
+def _sse_error_message(exc: Exception) -> str:
+    """Clean, user-facing message for an SSE error chunk.
+
+    HTTPExceptions raised inside a StreamingResponse generator can't change
+    the already-sent HTTP status code, so they're surfaced as an `error`
+    field in the SSE payload instead — but str(HTTPException) renders as
+    "400: {'code': ..., 'message': ...}", which is not fit for display.
+    """
+    if isinstance(exc, HTTPException):
+        detail = exc.detail
+        if isinstance(detail, dict):
+            return str(detail.get("message") or detail)
+        return str(detail)
+    return str(exc)
+
+
 async def _cache_game_state(game_state: GameState) -> None:
     try:
         redis_conn = await get_redis()
@@ -132,6 +148,7 @@ class UpdateCaseStateRequest(BaseModel):
     time_elapsed: int = 0
     clue_used: bool = False
     user_answer: Optional[str] = None  # User's answer (if provided before escalating)
+    dice_result: Optional[int] = None  # 0-10; only applied when game_config.dice_enabled
     model_name: Optional[str] = None
     api_key: Optional[str] = None
     provider: Optional[str] = "google"
@@ -302,7 +319,7 @@ async def initialize_game(
             )
         except Exception as e:
             logger.exception("Failed to initialize game master agent")
-            raise HTTPException(status_code=500, detail=f"Failed to initialize game master agent: {str(e)}")
+            raise HTTPException(status_code=500, detail="Failed to initialize game master agent")
         
         # Get initial difficulty level (for demo mode)
         initial_difficulty = None
@@ -315,16 +332,25 @@ async def initialize_game(
         
         user_details = UserDetails(user_id=user_id) if user_id else None
         try:
-            game_world, game_state, case_state, npc_states, previous_cases = await game_master.initialize_game(
-                game_config=request.game_config,
-                user_id=user_id,
-                is_demo=request.is_demo,
-                user_details=user_details,
-                initial_difficulty=initial_difficulty
+            game_world, game_state, case_state, npc_states, previous_cases = await asyncio.wait_for(
+                game_master.initialize_game(
+                    game_config=request.game_config,
+                    user_id=user_id,
+                    is_demo=request.is_demo,
+                    user_details=user_details,
+                    initial_difficulty=initial_difficulty
+                ),
+                timeout=config.AGENT_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.error("initialize_game timed out after %ss", config.AGENT_TIMEOUT)
+            raise HTTPException(
+                status_code=504,
+                detail="Game creation is taking longer than expected. Please try again.",
             )
         except Exception as e:
             logger.exception("initialize_game agent call failed")
-            raise HTTPException(status_code=500, detail=f"Failed to initialize game: {str(e)}")
+            raise HTTPException(status_code=500, detail="Failed to initialize game. Please try again.")
         
         # Save complete session state to Redis
         try:
@@ -349,7 +375,7 @@ async def initialize_game(
                 )
         except Exception as e:
             # Log error but continue - Redis is optional
-            print(f"Redis cache error (non-critical): {e}")
+            logger.warning(f"Redis cache error (non-critical): {e}")
         
         # Persist to Supabase in the background — Redis already holds the full state,
         # so the response can be returned immediately without waiting for DB writes.
@@ -377,6 +403,12 @@ async def initialize_game(
                     "updated_at": datetime.now().isoformat(),
                 }
                 await _sb(lambda: supabase.table("game_states").insert(insert_payload).execute())
+
+                try:
+                    from service.database import get_database_service
+                    await get_database_service().record_game_stat(db_user_id, created=1, played=1)
+                except Exception:
+                    logger.warning("Failed to record game_statistics for %s", db_user_id)
 
                 if previous_cases:
                     from service.database import get_database_service
@@ -410,7 +442,8 @@ async def initialize_game(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to initialize game: {str(e)}")
+        logger.exception("Failed to initialize game")
+        raise HTTPException(status_code=500, detail="Failed to initialize game")
 
 
 def _resolve_chat_credentials(
@@ -496,11 +529,11 @@ async def game_master_chat(request: GameMasterChatRequest):
                 }
                 yield f"data: {json.dumps(chunk)}\n\n"
                 await asyncio.sleep(0.02)
-                
+
         except Exception as e:
-            error_chunk = {"error": str(e), "complete": True}
+            error_chunk = {"error": _sse_error_message(e), "complete": True}
             yield f"data: {json.dumps(error_chunk)}\n\n"
-    
+
     return StreamingResponse(
         generate_response(),
         media_type="text/event-stream",
@@ -577,11 +610,11 @@ async def npc_chat(request: NPCChatRequest):
                 }
                 yield f"data: {json.dumps(chunk)}\n\n"
                 await asyncio.sleep(0.03)
-                
+
         except Exception as e:
-            error_chunk = {"error": str(e), "complete": True}
+            error_chunk = {"error": _sse_error_message(e), "complete": True}
             yield f"data: {json.dumps(error_chunk)}\n\n"
-    
+
     return StreamingResponse(
         generate_response(),
         media_type="text/event-stream",
@@ -608,27 +641,40 @@ async def update_case_state(request: UpdateCaseStateRequest):
         case_metadata = getattr(game_state, "case_metadata", None) or getattr(game_state.case_state, "case_metadata", None)
 
         model_answer = getattr(game_state.case_state, "answer", None) if game_state.case_state else None
+        dice_result = None
+        if getattr(game_state.game_config, "dice_enabled", False) and request.dice_result is not None:
+            dice_result = max(0, min(10, request.dice_result))
         try:
-            state_change = await game_master.update_clinical_case(
-                current_case_state=game_state.case_state,
-                case_metadata=case_metadata,
-                user_performance=latest_performance,
-                time_elapsed=request.time_elapsed,
-                clue_used=request.clue_used,
-                user_answer=request.user_answer,
-                model_answer=model_answer,
-                existing_npc_states=getattr(game_state.case_state, "npc_states", None),
-                game_world=game_state.game_world,
+            state_change = await asyncio.wait_for(
+                game_master.update_clinical_case(
+                    current_case_state=game_state.case_state,
+                    case_metadata=case_metadata,
+                    user_performance=latest_performance,
+                    time_elapsed=request.time_elapsed,
+                    clue_used=request.clue_used,
+                    user_answer=request.user_answer,
+                    model_answer=model_answer,
+                    dice_result=dice_result,
+                    existing_npc_states=getattr(game_state.case_state, "npc_states", None),
+                    game_world=game_state.game_world,
+                ),
+                timeout=config.AGENT_TIMEOUT,
             )
+        except asyncio.TimeoutError:
+            logger.error("update_case_state timed out after %ss", config.AGENT_TIMEOUT)
+            raise HTTPException(status_code=504, detail="Case update is taking longer than expected. Please try again.")
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to update case state: {str(e)}")
+            logger.exception("Failed to update case state")
+            raise HTTPException(status_code=500, detail="Failed to update case state")
         
         # Update game state
         game_state.case_state = state_change.updated_case_state
         game_state.last_updated = datetime.now()
         
         # Check if max changes reached (handoff to game master)
-        if game_state.case_state.n_changes >= game_state.case_state.max_clinical_changes:
+        handoff_occurred = game_state.case_state.n_changes >= game_state.case_state.max_clinical_changes
+        cases_remaining_before_handoff = game_state.current_case_number < game_state.total_cases
+        if handoff_occurred:
             # Get latest performance for handoff
             latest_performance = None
             if game_state.user_performance:
@@ -649,14 +695,44 @@ async def update_case_state(request: UpdateCaseStateRequest):
                 api_key=request.api_key,
                 provider=request.provider or "google"
             )
-            game_state = await game_master.handoff_from_state_controller(
-                game_state=game_state,
-                final_performance=latest_performance
-            )
-        
+            try:
+                game_state = await asyncio.wait_for(
+                    game_master.handoff_from_state_controller(
+                        game_state=game_state,
+                        final_performance=latest_performance
+                    ),
+                    timeout=config.AGENT_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                logger.error("handoff_from_state_controller timed out after %ss", config.AGENT_TIMEOUT)
+                raise HTTPException(status_code=504, detail="Generating the next case is taking longer than expected. Please try again.")
+            except HTTPException:
+                raise
+            except Exception:
+                logger.exception("handoff_from_state_controller failed")
+                raise HTTPException(status_code=500, detail="Failed to generate the next case")
+
         await _cache_game_state(game_state)
         await _persist_game_state_update(game_state)
-        
+
+        # Quest is complete when a handoff happened but there was no next
+        # case to generate (we were already on the last case).
+        quest_complete = handoff_occurred and not cases_remaining_before_handoff
+
+        if quest_complete:
+            db_user_id = _valid_uuid(game_state.user_id)
+            if db_user_id:
+                try:
+                    avg_score_10 = (
+                        sum(p.score for p in game_state.user_performance) / len(game_state.user_performance)
+                        if game_state.user_performance else 0.0
+                    )
+                    await get_database_service().record_game_stat(
+                        db_user_id, completed=1, score_pct=min(100.0, max(0.0, avg_score_10 * 10))
+                    )
+                except Exception:
+                    logger.warning("Failed to record game completion stat for %s", db_user_id)
+
         return {
             "success": True,
             "game_state": game_state.model_dump(mode="json"),
@@ -665,13 +741,15 @@ async def update_case_state(request: UpdateCaseStateRequest):
                 "change_description": state_change.change_description,
                 "penalty_applied": state_change.penalty_applied
             },
-            "handoff_occurred": game_state.case_state.n_changes >= game_state.case_state.max_clinical_changes
+            "handoff_occurred": handoff_occurred,
+            "quest_complete": quest_complete,
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update state: {str(e)}")
+        logger.exception("Failed to update state")
+        raise HTTPException(status_code=500, detail="Failed to update state")
 
 
 @router.post("/game/use-clue")
@@ -695,18 +773,27 @@ async def use_clue(request: UseClueRequest):
         )
         
         return await update_case_state(update_request)
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to use clue: {str(e)}")
+        logger.exception("Failed to use clue")
+        raise HTTPException(status_code=500, detail="Failed to use clue")
 
 
 @router.post("/game/submit-answer")
 async def submit_answer(request: SubmitAnswerRequest):
-    """Submit answer and get performance analysis"""
+    """
+    Submit an answer: score it, then escalate/de-escalate the clinical case
+    based on the result and hand off to the next case once
+    max_clinical_changes is reached (delegates to update_case_state, the
+    same path "Use Clue" uses, so a case actually progresses on every
+    answer instead of only when a clue is used).
+    """
     try:
         # Parse game state
         game_state = parse_client_game_state(request.game_state)
-        
+
         # Analyze performance
         performance = await _analyze_performance(
             game_state,
@@ -716,37 +803,26 @@ async def submit_answer(request: SubmitAnswerRequest):
             request.api_key,
             request.provider
         )
-        
-        # Add to performance history
+
+        # Add to performance history so update_case_state picks it up as the
+        # latest performance for escalation/handoff decisions.
         game_state.user_performance.append(performance)
 
-        # Apply dice-roll modifier if enabled
-        dice_effect_desc = None
-        if getattr(game_state.game_config, "dice_enabled", False) and request.dice_result is not None:
-            dr = max(0, min(10, request.dice_result))
-            try:
-                game_master = get_game_master_agent(
-                    model_name=request.model_name,
-                    api_key=request.api_key,
-                    provider=request.provider or "google",
-                )
-                state_change = await game_master.update_clinical_case(
-                    current_case_state=game_state.case_state,
-                    case_metadata=getattr(game_state, "case_metadata", None),
-                    user_performance=performance,
-                    user_answer=request.answer,
-                    model_answer=getattr(game_state.case_state, "answer", None),
-                    dice_result=dr,
-                    existing_npc_states=getattr(game_state.case_state, "npc_states", None),
-                    game_world=game_state.game_world,
-                )
-                game_state.case_state = state_change.updated_case_state
-                dice_effect_desc = state_change.change_description
-            except Exception as dice_err:
-                print(f"Dice effect error (non-critical): {dice_err}")
+        update_request = UpdateCaseStateRequest(
+            game_state=game_state.model_dump(mode="json"),
+            time_elapsed=request.time_taken,
+            clue_used=False,
+            user_answer=request.answer,
+            dice_result=request.dice_result,
+            model_name=request.model_name,
+            api_key=request.api_key,
+            provider=request.provider,
+        )
+        update_result = await update_case_state(update_request)
+        updated_game_state = update_result["game_state"]
 
-        # Award XP for completing a case: 50-100 based on performance score (0-10 scale)
-        user_id = game_state.user_id
+        # Award XP for the answered case: 50-100 based on performance score (0-10 scale)
+        user_id = updated_game_state.get("user_id")
         if user_id and not str(user_id).startswith("demo_"):
             try:
                 from service.database import get_database_service
@@ -760,22 +836,26 @@ async def submit_answer(request: SubmitAnswerRequest):
                     total_quests_delta=1
                 )
             except Exception as xp_err:
-                print(f"Error awarding game XP: {xp_err}")
-        
-        await _cache_game_state(game_state)
-        await _persist_game_state_update(game_state)
-        
+                logger.warning(f"Error awarding game XP: {xp_err}")
+
         resp = {
             "success": True,
             "performance": performance.model_dump(mode="json"),
-            "game_state": game_state.model_dump(mode="json"),
+            "game_state": updated_game_state,
+            "state_change": update_result.get("state_change"),
+            "handoff_occurred": update_result.get("handoff_occurred", False),
+            "quest_complete": update_result.get("quest_complete", False),
         }
-        if dice_effect_desc:
-            resp["dice_effect"] = dice_effect_desc
+        state_change = update_result.get("state_change") or {}
+        if request.dice_result is not None and state_change.get("change_description"):
+            resp["dice_effect"] = state_change["change_description"]
         return resp
 
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to submit answer: {str(e)}")
+        logger.exception("Failed to submit answer")
+        raise HTTPException(status_code=500, detail="Failed to submit answer")
 
 
 @router.post("/game/dice-effect")
@@ -828,7 +908,8 @@ async def apply_dice_effect(request: Dict[str, Any]):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Dice effect failed: {str(e)}")
+        logger.exception("Dice effect failed")
+        raise HTTPException(status_code=500, detail="Dice effect failed")
 
 
 @router.get("/game/{game_id}")
@@ -843,7 +924,7 @@ async def get_game_state(game_id: str):
                 if cached:
                     return {"success": True, "game_state": json.loads(cached)}
         except Exception as e:
-            print(f"Redis read error (non-critical): {e}")
+            logger.warning(f"Redis read error (non-critical): {e}")
         
         # Fallback to Supabase with error handling
         try:
@@ -860,12 +941,14 @@ async def get_game_state(game_id: str):
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to read from database: {str(e)}")
+            logger.exception("Failed to read from database")
+            raise HTTPException(status_code=500, detail="Failed to read from database")
         
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get game: {str(e)}")
+        logger.exception("Failed to get game")
+        raise HTTPException(status_code=500, detail="Failed to get game")
 
 
 @router.delete("/game/{game_id}")
@@ -878,7 +961,7 @@ async def delete_game(game_id: str):
             if redis_conn:
                 await redis_conn.delete(f"gs:{game_id}")
         except Exception as e:
-            print(f"Redis delete error (non-critical): {e}")
+            logger.warning(f"Redis delete error (non-critical): {e}")
         
         # Delete from Supabase with error handling
         try:
@@ -886,14 +969,16 @@ async def delete_game(game_id: str):
                 lambda: supabase.table("game_states").delete().eq("id", game_id).execute()
             )
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to delete from database: {str(e)}")
+            logger.exception("Failed to delete from database")
+            raise HTTPException(status_code=500, detail="Failed to delete from database")
         
         return {"success": True, "message": "Game deleted"}
         
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete game: {str(e)}")
+        logger.exception("Failed to delete game")
+        raise HTTPException(status_code=500, detail="Failed to delete game")
 
 
 # ============================================
@@ -913,7 +998,7 @@ async def _analyze_performance(
     from model import select_model_with_fallback
     from configs.config import config
 
-    resolved_name = model_name or config.GAME_MASTER_MODEL_NAME or "nvidia/nemotron-3-nano-30b-a3b:free"
+    resolved_name = model_name or config.GAME_MASTER_MODEL_NAME or "meta-llama/llama-3.3-70b-instruct:free"
 
     model, _ = select_model_with_fallback(resolved_name, api_key)
 
@@ -1024,7 +1109,7 @@ async def save_game(request: SaveGameRequest):
         raise
     except Exception as e:
         logger.exception("save_game failed for game %s", getattr(request, "game_state", {}).get("game_id"))
-        raise HTTPException(status_code=500, detail=f"Failed to save game: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to save game")
 
 
 @router.post("/game/save-checkpoint")
@@ -1068,7 +1153,8 @@ async def save_checkpoint(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save checkpoint: {str(e)}")
+        logger.exception("Failed to save checkpoint")
+        raise HTTPException(status_code=500, detail="Failed to save checkpoint")
 
 
 @router.get("/game/checkpoints")
@@ -1088,7 +1174,30 @@ async def list_checkpoints(authorization: Optional[str] = Header(None)):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list checkpoints: {str(e)}")
+        logger.exception("Failed to list checkpoints")
+        raise HTTPException(status_code=500, detail="Failed to list checkpoints")
+
+
+@router.get("/game/checkpoints/{checkpoint_id}")
+async def get_checkpoint(checkpoint_id: str, authorization: Optional[str] = Header(None)):
+    """Fetch the full saved game state for one checkpoint, to resume play."""
+    from api.auth_deps import decode_jwt_user_id
+
+    user_id = _valid_uuid(decode_jwt_user_id(authorization))
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    try:
+        db_service = get_database_service()
+        row = await db_service.get_checkpoint(user_id, checkpoint_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Checkpoint not found")
+        return {"success": True, "game_state": row.get("state") or {}}
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Failed to load checkpoint")
+        raise HTTPException(status_code=500, detail="Failed to load checkpoint")
 
 
 @router.delete("/game/checkpoints/{checkpoint_id}")
@@ -1109,7 +1218,8 @@ async def delete_checkpoint(checkpoint_id: str, authorization: Optional[str] = H
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete checkpoint: {str(e)}")
+        logger.exception("Failed to delete checkpoint")
+        raise HTTPException(status_code=500, detail="Failed to delete checkpoint")
 
 
 @router.post("/game/migrate-demo")
@@ -1168,4 +1278,5 @@ async def migrate_demo_game(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to migrate demo game: {str(e)}")
+        logger.exception("Failed to migrate demo game")
+        raise HTTPException(status_code=500, detail="Failed to migrate demo game")

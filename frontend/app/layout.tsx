@@ -4,6 +4,7 @@ import { Inter } from "next/font/google"
 import "./globals.css"
 import { ThemeProvider } from "@/app/components/theme-provider"
 import Navbar from "@/app/components/navbar"
+import WaitlistBanner from "@/app/components/waitlist-banner"
 import { Toaster } from "@/app/components/ui/toaster"
 
 const inter = Inter({ subsets: ["latin"] })
@@ -23,8 +24,9 @@ export default function RootLayout({
     <html lang="en" className="dark" suppressHydrationWarning>
       <body className={`${inter.className} bg-black text-white`}>
         <ThemeProvider attribute="class" defaultTheme="dark" enableSystem={false}>
+          <WaitlistBanner />
           <Navbar />
-          <main className="pt-16">{children}</main>
+          <main className="pt-[6.25rem]">{children}</main>
           <Toaster />
         </ThemeProvider>
       </body>

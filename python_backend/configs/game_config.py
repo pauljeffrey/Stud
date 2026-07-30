@@ -258,64 +258,10 @@ SUBJECT = {
     # Nutrition
     "Nutritionist": ["anatomy", "physiology", "biochemistry", "pathology", "nutrition"],
     "Dietitian": ["anatomy", "physiology", "biochemistry", "pathology", "nutrition", "dietetics"],
-    
-    ##
-    "Psychiatrist": ["anatomy", "physiology", "biochemistry", "pathology", "psychology", "psychiatry"],
+
+    # Psychology (Psychiatrist/Clinical Psychologist/Health Psychologist defined above)
     "Psychologist": ["anatomy", "physiology", "biochemistry", "pathology", "psychology"],
     "Psychotherapist": ["anatomy", "physiology", "biochemistry", "pathology", "psychology", "psychotherapy"],
-    "Psychologist": ["anatomy", "physiology", "biochemistry", "pathology", "psychology"],
-    "Psychologist": ["anatomy", "physiology", "biochemistry", "pathology", "psychology"],
-    
-    # Community health workers
-    "Community Health Worker": ["anatomy", "physiology", "pathology", "public health", "community medicine"],
-    
-    # Traditional Birth Attendant
-    "Traditional Birth Attendant": ["anatomy", "physiology", "obstetrics", "midwifery"],
-    
-    # Midwife
-    "Midwife": ["anatomy", "physiology", "biochemistry", "pathology", "pharmacology", "obstetrics", "gynecology", "midwifery"],
-    
-    # Paramedic
-    "Paramedic": ["anatomy", "physiology", "pathology", "pharmacology", "emergency medicine", "trauma"],
-    
-    # Emergency Medical Technician (EMT)
-    "Emergency Medical Technician (EMT)": ["anatomy", "physiology", "pathology", "pharmacology", "emergency medicine"],
-    
-    # Medical Assistant
-    "Medical Assistant": ["anatomy", "physiology", "pathology", "pharmacology"],
-    
-    # Phlebotomist
-    "Phlebotomist": ["anatomy", "physiology", "pathology"],
-    
-    # Medical Coder
-    "Medical Coder": ["anatomy", "physiology", "pathology", "medical coding"],
-    
-    # Health Information Manager
-    "Health Information Manager": ["anatomy", "physiology", "pathology", "health information systems"],
-    
-    # Medical Social Worker
-    "Medical Social Worker": ["anatomy", "physiology", "pathology", "psychology", "social work"],
-    
-    # Clinical Psychologist
-    "Clinical Psychologist": ["anatomy", "physiology", "biochemistry", "pathology", "psychology", "psychiatry"],
-    
-    # Health Psychologist
-    "Health Psychologist": ["anatomy", "physiology", "pathology", "psychology", "public health"],
-    
-    # Nutritionist
-    "Nutritionist": ["anatomy", "physiology", "biochemistry", "pathology", "nutrition"],
-    
-    # Dietitian
-    "Dietitian": ["anatomy", "physiology", "biochemistry", "pathology", "nutrition", "dietetics"],
-    
-    # Medical Writer
-    "Medical Writer": ["anatomy", "physiology", "biochemistry", "pathology", "pharmacology", "medical writing"],
-    
-    # Medical Researcher
-    "Medical Researcher": ["anatomy", "physiology", "biochemistry", "pathology", "pharmacology", "research methodology"],
-    
-    # Clinical Research Coordinator
-    "Clinical Research Coordinator": ["anatomy", "physiology", "biochemistry", "pathology", "pharmacology", "clinical research"],
 
     # Research & Writing
     "Medical Writer": ["anatomy", "physiology", "biochemistry", "pathology", "pharmacology", "medical writing"],

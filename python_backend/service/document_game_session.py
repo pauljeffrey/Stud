@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from configs import config
+from configs.config import config
 from service.redis_service import get_redis_service
 
 logger = logging.getLogger(__name__)

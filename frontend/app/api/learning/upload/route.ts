@@ -4,6 +4,8 @@ import { PYTHON_BACKEND_URL } from "@/app/lib/proxy"
 const MAX_FILE_SIZE = 10 * 1024 * 1024 // 10MB
 const MAX_IMAGE_SIZE = 5 * 1024 * 1024 // 5MB
 
+export const maxDuration = 300
+
 export async function POST(req: Request) {
   try {
     const formData = await req.formData()

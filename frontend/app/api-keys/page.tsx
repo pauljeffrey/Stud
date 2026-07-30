@@ -4,44 +4,74 @@ import Link from "next/link"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/app/components/ui/card"
 import { Button } from "@/app/components/ui/button"
 import { Badge } from "@/app/components/ui/badge"
-import { ExternalLink, KeyRound, Shield } from "lucide-react"
+import { ExternalLink, KeyRound, Shield, CreditCard, AlertCircle } from "lucide-react"
 
 const PROVIDERS = [
   {
     id: "openai",
     name: "OpenAI",
-    models: ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"],
+    models: [
+      "gpt-4o-mini",
+      "gpt-4o",
+      "gpt-4.1-mini",
+      "gpt-4.1",
+      "gpt-4.1-nano",
+      "o3-mini",
+      "o4-mini",
+    ],
     steps: [
       "Sign in at platform.openai.com.",
       "Open API keys in the left sidebar (Settings → API keys).",
       "Click Create new secret key and copy it immediately — you will not see it again.",
+      "Add billing and purchase credits (or set up prepaid balance) — a key alone is not enough without paid usage.",
+      "Check current pricing at openai.com/api/pricing before choosing a model.",
       "Use a model name like gpt-4o-mini in Stud.",
     ],
     url: "https://platform.openai.com/api-keys",
+    pricingUrl: "https://openai.com/api/pricing",
   },
   {
     id: "google",
     name: "Google Gemini",
-    models: ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-pro"],
+    models: [
+      "gemini-2.0-flash",
+      "gemini-2.5-flash",
+      "gemini-2.5-pro",
+      "gemini-1.5-flash",
+      "gemini-1.5-pro",
+      "gemini-2.0-flash-lite",
+    ],
     steps: [
       "Go to Google AI Studio (aistudio.google.com).",
       "Click Get API key in the left menu.",
       "Create a key for your Google Cloud project and copy it.",
+      "Enable billing on your Google Cloud project — free tiers are limited; paid usage requires credits/billing.",
+      "Review Gemini API pricing on ai.google.dev/gemini-api/docs/pricing for your chosen model.",
       "Use a model name like gemini-2.0-flash in Stud.",
     ],
     url: "https://aistudio.google.com/apikey",
+    pricingUrl: "https://ai.google.dev/gemini-api/docs/pricing",
   },
   {
     id: "anthropic",
     name: "Anthropic",
-    models: ["claude-3-5-sonnet-latest", "claude-3-5-haiku-latest"],
+    models: [
+      "claude-sonnet-4-20250514",
+      "claude-3-5-sonnet-latest",
+      "claude-3-5-haiku-latest",
+      "claude-3-opus-20240229",
+      "claude-3-haiku-20240307",
+    ],
     steps: [
       "Create an account at console.anthropic.com.",
       "Open API Keys and create a new key.",
       "Copy the key and store it somewhere safe.",
+      "Add a payment method and purchase credits — Anthropic bills per token usage; your key will not work without available credit.",
+      "Compare model costs at anthropic.com/pricing before you pick a model.",
       "Use a model name like claude-3-5-sonnet-latest, or an OpenRouter ID anthropic/claude-3.5-sonnet.",
     ],
     url: "https://console.anthropic.com/settings/keys",
+    pricingUrl: "https://www.anthropic.com/pricing",
   },
   {
     id: "openrouter",
@@ -49,15 +79,23 @@ const PROVIDERS = [
     models: [
       "meta-llama/llama-3.3-70b-instruct:free",
       "nvidia/nemotron-3-nano-30b-a3b:free",
+      "google/gemini-2.0-flash-001",
+      "openai/gpt-4o-mini",
       "anthropic/claude-3.5-sonnet",
+      "deepseek/deepseek-chat",
+      "mistralai/mistral-small-3.1-24b-instruct",
+      "qwen/qwen-2.5-72b-instruct",
     ],
     steps: [
       "Sign up at openrouter.ai.",
       "Open Keys and create an API key.",
       "Copy the key — it starts with sk-or-.",
+      "Add credits to your OpenRouter account — even free models may require a topped-up balance for API access.",
+      "Each model has its own price on openrouter.ai/models; filter by cost before you choose.",
       "Use the full model slug from openrouter.ai/models (provider/model-name).",
     ],
     url: "https://openrouter.ai/keys",
+    pricingUrl: "https://openrouter.ai/models",
   },
 ]
 
@@ -78,6 +116,30 @@ export default function ApiKeysGuidePage() {
           </p>
         </div>
 
+        <Card className="bg-amber-950/40 border-amber-600/50">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-amber-200">
+              <CreditCard className="h-5 w-5" />
+              You need paid credits — not just an API key
+            </CardTitle>
+            <div className="text-amber-100/80 text-base space-y-3 pt-1">
+              <p>
+                Creating an API key is only the first step. <strong>Stud will not work</strong> unless
+                your chosen provider has <strong>billing enabled and enough credits or balance</strong> to
+                run the model you select.
+              </p>
+              <p className="flex items-start gap-2">
+                <AlertCircle className="h-4 w-4 shrink-0 mt-0.5 text-amber-300" />
+                <span>
+                  Before you start, open that provider&apos;s <strong>pricing page</strong> (linked on each
+                  card below). Costs vary widely by model — a fast/cheap model is usually best for
+                  Mediquest, Study, and Quiz.
+                </span>
+              </p>
+            </div>
+          </CardHeader>
+        </Card>
+
         <Card className="bg-black/50 border-purple-700/40">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-purple-200">
@@ -97,13 +159,22 @@ export default function ApiKeysGuidePage() {
               <CardHeader>
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <CardTitle>{p.name}</CardTitle>
-                  <Button variant="outline" size="sm" asChild className="border-purple-600">
-                    <a href={p.url} target="_blank" rel="noopener noreferrer">
-                      Open console <ExternalLink className="ml-1 h-3 w-3" />
-                    </a>
-                  </Button>
+                  <div className="flex flex-wrap gap-2">
+                    <Button variant="outline" size="sm" asChild className="border-purple-600">
+                      <a href={p.url} target="_blank" rel="noopener noreferrer">
+                        Get API key <ExternalLink className="ml-1 h-3 w-3" />
+                      </a>
+                    </Button>
+                    <Button variant="outline" size="sm" asChild className="border-amber-600/60 text-amber-100">
+                      <a href={p.pricingUrl} target="_blank" rel="noopener noreferrer">
+                        View pricing <ExternalLink className="ml-1 h-3 w-3" />
+                      </a>
+                    </Button>
+                  </div>
                 </div>
-                <CardDescription className="text-gray-400">Example model names</CardDescription>
+                <CardDescription className="text-gray-400">
+                  Example model names — confirm cost on the provider&apos;s pricing page before use
+                </CardDescription>
                 <div className="flex flex-wrap gap-2 pt-1">
                   {p.models.map((m) => (
                     <Badge key={m} variant="secondary" className="bg-purple-900/50 text-purple-100">

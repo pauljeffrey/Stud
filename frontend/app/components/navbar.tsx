@@ -9,6 +9,7 @@ import { usePathname, useRouter } from "next/navigation"
 import { cn } from "@/lib/utils"
 import { motion } from "framer-motion"
 import { useAuth } from "@/app/lib/auth"
+import NotificationBell from "@/app/components/notification-bell"
 
 export default function Navbar() {
   const [isMenuOpen, setIsMenuOpen] = useState(false)
@@ -20,7 +21,6 @@ export default function Navbar() {
   const handleLogout = async () => {
     await logout()
     setIsMenuOpen(false)
-    localStorage.removeItem("session_token")
     router.push("/auth/login")
   }
 
@@ -33,7 +33,7 @@ export default function Navbar() {
   return (
     <motion.nav
       className={cn(
-        "w-full py-4 px-6 z-50 fixed top-0 left-0",
+        "w-full py-4 px-6 z-50 fixed top-9 left-0",
         isAuthPage ? "bg-purple-950/95 backdrop-blur-sm" : "bg-black/90 backdrop-blur-md border-b border-purple-900/30"
       )}
       initial={{ y: -100 }}
@@ -120,6 +120,7 @@ export default function Navbar() {
           <div className="flex items-center space-x-2">
             {isLoggedIn ? (
               <>
+                <NotificationBell />
                 <Link href="/dashboard">
                   <Button variant="ghost" className="text-white hover:bg-purple-800">
                     <LayoutDashboard className="h-4 w-4 mr-1" />

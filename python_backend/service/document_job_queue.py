@@ -12,7 +12,7 @@ import os
 import uuid
 from typing import Any, Dict, Optional
 
-from configs import config
+from configs.config import config
 from service.redis_service import get_redis_service
 
 logger = logging.getLogger(__name__)

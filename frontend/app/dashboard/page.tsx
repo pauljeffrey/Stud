@@ -43,6 +43,13 @@ import {
 import { useToast } from "@/app/components/ui/use-toast"
 import Link from "next/link"
 import { motion } from "framer-motion"
+import {
+  fetchAccountCredentials,
+  getAccountCredentials,
+  persistAccountCredentials,
+  saveAccountCredentials,
+} from "@/app/lib/api-credentials"
+import { apiFetch, getToken } from "@/app/lib/auth"
 
 interface UserStats {
   totalQuests: number
@@ -130,19 +137,14 @@ export default function DashboardPage() {
       if (isInitialLoad) {
         setIsLoading(true)
       }
-      const token = localStorage.getItem("token")
-      if (!token) {
-        // Redirect to login if no token
+      if (!getToken()) {
+        // Redirect to login if not authenticated
         window.location.href = "/auth/login"
         return
       }
 
       // Fetch user stats
-      const statsResponse = await fetch("/api/user/stats", {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      })
+      const statsResponse = await apiFetch("/api/user/stats")
 
       if (statsResponse.ok) {
         const statsData = await statsResponse.json()
@@ -194,11 +196,7 @@ export default function DashboardPage() {
       }
 
       // Fetch recent games
-      const gamesResponse = await fetch("/api/user/recent-games?limit=3", {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      })
+      const gamesResponse = await apiFetch("/api/user/recent-games?limit=3")
       if (gamesResponse.ok) {
         const gamesData = await gamesResponse.json()
         if (gamesData.success) {
@@ -207,11 +205,7 @@ export default function DashboardPage() {
       }
 
       // Fetch recent quizzes
-      const quizzesResponse = await fetch("/api/user/recent-quizzes?limit=3", {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      })
+      const quizzesResponse = await apiFetch("/api/user/recent-quizzes?limit=3")
       if (quizzesResponse.ok) {
         const quizzesData = await quizzesResponse.json()
         if (quizzesData.success) {
@@ -220,11 +214,7 @@ export default function DashboardPage() {
       }
 
       // Fetch recent activities
-      const activitiesResponse = await fetch("/api/user/recent-activities?limit=5", {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      })
+      const activitiesResponse = await apiFetch("/api/user/recent-activities?limit=5")
       if (activitiesResponse.ok) {
         const activitiesData = await activitiesResponse.json()
         if (activitiesData.success) {
@@ -233,23 +223,33 @@ export default function DashboardPage() {
       }
 
       // Load API settings from database (or fallback to localStorage)
-      const settingsResponse = await fetch("/api/user/settings", {
-        headers: { Authorization: `Bearer ${token}` },
-      })
+      const settingsResponse = await apiFetch("/api/user/settings")
       if (settingsResponse.ok) {
         const settingsData = await settingsResponse.json()
         if (settingsData.success && settingsData.settings) {
           const s = settingsData.settings
-          setApiSettings({
+          const next = {
             provider: s.provider || "gemini",
             modelName: s.modelName || "",
             apiKey: s.apiKey || "",
-          })
+          }
+          setApiSettings(next)
+          if (next.modelName && next.apiKey) {
+            persistAccountCredentials({
+              provider: next.provider,
+              modelName: next.modelName,
+              apiKey: next.apiKey,
+            })
+          }
         }
       } else {
-        const savedSettings = localStorage.getItem("apiSettings")
-        if (savedSettings) {
-          setApiSettings(JSON.parse(savedSettings))
+        const cached = getAccountCredentials()
+        if (cached) {
+          setApiSettings({
+            provider: cached.provider,
+            modelName: cached.modelName,
+            apiKey: cached.apiKey,
+          })
         }
       }
     } catch (error) {
@@ -273,31 +273,26 @@ export default function DashboardPage() {
 
   const saveApiSettings = async () => {
     try {
-      const token = localStorage.getItem("token")
+      const token = getToken()
       if (token) {
-        const response = await fetch("/api/user/settings", {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({
+        await saveAccountCredentials(
+          {
             provider: apiSettings.provider,
             modelName: apiSettings.modelName,
             apiKey: apiSettings.apiKey,
-          }),
+          },
+          token
+        )
+        toast({
+          title: "Settings Saved",
+          description: "Your API settings have been saved to your account.",
         })
-        if (response.ok) {
-          localStorage.setItem("apiSettings", JSON.stringify(apiSettings))
-          toast({
-            title: "Settings Saved",
-            description: "Your API settings have been saved to your account.",
-          })
-        } else {
-          throw new Error("Failed to save")
-        }
       } else {
-        localStorage.setItem("apiSettings", JSON.stringify(apiSettings))
+        persistAccountCredentials({
+          provider: apiSettings.provider,
+          modelName: apiSettings.modelName,
+          apiKey: apiSettings.apiKey,
+        })
         toast({
           title: "Settings Saved",
           description: "Saved locally (log in to sync across devices).",

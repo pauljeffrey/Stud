@@ -4,15 +4,15 @@ uvicorn[standard]
 gunicorn
 
 # Pydantic and AI
-pydantic
-pydantic-ai
-pydantic-ai-slim[openrouter]
+pydantic[email]
+# model.py imports pydantic_ai.models.anthropic unconditionally (used when a
+# model name contains "claude"), so the anthropic extra is required at import
+# time even though most default model configs use google/openrouter.
+pydantic-ai-slim[openrouter,google,anthropic]
 griffe
 
 # Database and Storage
 supabase
-asyncpg
-pgvector
 
 # Caching
 redis
@@ -33,7 +33,6 @@ Pillow
 # Authentication & Encryption
 bcrypt
 python-jose[cryptography]
-passlib[bcrypt]
 cryptography
 
 # AWS S3 (optional)
@@ -42,9 +41,4 @@ boto3
 # Utilities
 python-multipart
 python-dotenv
-aiofiles
 python-dateutil
-
-# Optional: LangChain (if needed for future features)
-# langchain==0.1.0
-# langchain-community==0.0.10

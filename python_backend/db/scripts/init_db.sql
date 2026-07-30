@@ -35,6 +35,9 @@ CREATE TABLE IF NOT EXISTS users (
     is_active BOOLEAN DEFAULT TRUE
 );
 
+-- NOTE: no longer written to or read by the app -- auth is JWT-bearer only now
+-- (see api/auth.py). Left in place rather than dropped so existing deployments
+-- don't need a destructive migration; safe to drop in a future cleanup pass.
 CREATE TABLE IF NOT EXISTS user_sessions (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id UUID REFERENCES users(id) ON DELETE CASCADE,

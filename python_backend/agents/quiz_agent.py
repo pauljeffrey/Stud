@@ -3,6 +3,7 @@ Quiz Agent for Stud
 Generates medical quiz questions from AI knowledge, documents, or internet
 Supports multiple choice, true/false, and open-ended questions
 """
+import logging
 import os
 from typing import Optional, List, Dict, Any, Union, Literal, Tuple
 from pydantic_ai import Agent
@@ -16,10 +17,14 @@ from datetime import datetime
 from configs.config import config
 from model import select_model
 from agents.agents import get_quiz_model
+from agents._shared import merge_credentials
 from models.states import Quiz, QuizQuestion, OpenEndedAnswer, DifficultyLevel
 from utils import search_internet
 from service.document_processor import get_document_processor
+from service.document_heuristics import dedup_text_snippets
 from service.database import get_database_service
+
+logger = logging.getLogger(__name__)
 
 
 class QuizAgent:
@@ -102,10 +107,9 @@ class QuizAgent:
         
     def _reinitialize_model(self, model_name: Optional[str] = None, api_key: Optional[str] = None):
         """Reinitialize the model with new user-provided credentials."""
-        if model_name is not None:
-            self._model_name = model_name
-        if api_key is not None:
-            self._api_key = api_key
+        self._model_name, self._api_key = merge_credentials(
+            self._model_name, self._api_key, model_name, api_key
+        )
 
         resolved_model = self._model_name or getattr(config, 'QUIZ_MODEL_NAME', None) or "gemini-2.0-flash"
         model = get_quiz_model(resolved_model, self._api_key)
@@ -146,6 +150,7 @@ class QuizAgent:
         num_open_ended: Optional[int] = None,
         difficulty_level: Optional[DifficultyLevel] = None,
         context: Optional[str] = None,
+        topic: Optional[str] = None,
         model_name: Optional[str] = None,
         api_key: Optional[str] = None,
         provider: str = "google"
@@ -217,7 +222,8 @@ class QuizAgent:
                 num_true_false=num_true_false,
                 num_open_ended=num_open_ended,
                 difficulty_level=difficulty_level,
-                user_subject_of_study=user_subject_of_study or user_profession
+                user_subject_of_study=user_subject_of_study or user_profession,
+                topic=topic,
             )
         else:
             subject_or_profession = user_subject_of_study or user_profession or "general medicine"
@@ -404,7 +410,7 @@ class QuizAgent:
                 return [q if isinstance(q, QuizQuestion) else QuizQuestion(**q) for q in out]
             return []
         except Exception as e:
-            print(f"Error generating questions for subtopic {subtopic}: {e}")
+            logger.warning(f"Error generating questions for subtopic {subtopic}: {e}")
             return []
     
     async def generate_questions_from_document(
@@ -422,18 +428,20 @@ class QuizAgent:
         num_true_false: Optional[int] = None,
         num_open_ended: Optional[int] = None,
         difficulty_level: Optional[DifficultyLevel] = None,
-        user_subject_of_study: Optional[str] = None
+        user_subject_of_study: Optional[str] = None,
+        topic: Optional[str] = None
     ) -> Quiz:
         """
         Generate quiz questions from document content.
-        
+
         Process:
-        1. Parse and chunk document
+        1. Parse and chunk document (whole document in order, or topic-targeted
+           via multi-query vector search when `topic` is supplied)
         2. Determine questions per chunk
         3. Generate questions for each chunk in parallel
         4. Rerank and refine questions
         5. Return Quiz
-        
+
         Args:
             text_content: Raw text content
             from_vector_db: Whether to retrieve from vector DB
@@ -448,19 +456,26 @@ class QuizAgent:
             num_open_ended: Number of open-ended questions
             difficulty_level: Difficulty level
             user_subject_of_study: Subject/field of study
-            
+            topic: Optional free-text topic — when given (with document_id),
+                chunks are selected via topic-focused vector search instead of
+                the entire document in order.
+
         Returns:
             Quiz object
         """
         # Parse document and get chunks
-        chunks = await self._parse_document(
-            text_content=text_content,
-            from_vector_db=from_vector_db,
-            file_path=file_path,
-            document_id=document_id,
-            user_id=user_id
-        )
-        
+        chunks = []
+        if topic and from_vector_db and document_id:
+            chunks = await self._search_chunks_for_topic(document_id, topic)
+        if not chunks:
+            chunks = await self._parse_document(
+                text_content=text_content,
+                from_vector_db=from_vector_db,
+                file_path=file_path,
+                document_id=document_id,
+                user_id=user_id
+            )
+
         if not chunks:
             raise ValueError("No document content found")
         
@@ -519,7 +534,7 @@ class QuizAgent:
         all_questions = []
         for q_list in question_lists:
             if isinstance(q_list, Exception):
-                print(f"Error generating questions for chunk: {q_list}")
+                logger.warning(f"Error generating questions for chunk: {q_list}")
                 continue
             all_questions.extend(q_list)
         
@@ -589,7 +604,7 @@ class QuizAgent:
 
             return questions
         except Exception as e:
-            print(f"Error generating questions for chunk {chunk_index}: {e}")
+            logger.warning(f"Error generating questions for chunk {chunk_index}: {e}")
             return []
     
     def determine_num_questions_per_chunk(
@@ -669,15 +684,16 @@ class QuizAgent:
         # Score questions (use existing score field or calculate)
         scored_questions = []
         for q in questions:
-            # Use existing score if available, otherwise default to 5.0
+            # Use existing score if available, otherwise default to 5.0 (scale is 0-10)
             score = getattr(q, 'score', None) or 5.0
-            
-            # Calculate quality score based on question properties
+            normalized_score = max(0.0, min(1.0, score / 10.0))
+
+            # Calculate quality score based on question properties (scale is 0-1)
             quality_score = self._calculate_quality_score(q)
-            
-            # Combined score
-            combined_score = (score * alpha) + (quality_score * beta)
-            
+
+            # Combined score, both inputs normalized to 0-1 so thresholds are meaningful
+            combined_score = (normalized_score * alpha) + (quality_score * beta)
+
             if combined_score >= score_threshold and quality_score >= quality_threshold:
                 scored_questions.append((combined_score, q))
         
@@ -781,6 +797,60 @@ class QuizAgent:
         refined.sort(key=lambda q: order_map.get(getattr(q, 'question_id', ''), 999))
         return refined[:len(questions)]
     
+    async def _expand_topic_queries(self, topic: str, n: int = 4) -> List[str]:
+        """Expand a free-text topic into several distinct search queries for
+        retrieving relevant document passages via vector search."""
+        prompt = f"""
+        Generate {n} distinct, specific search queries to retrieve document passages
+        relevant to the topic "{topic}" for medical education purposes.
+        Return only a JSON array of query strings, no explanations.
+        Example: ["query one", "query two", ...]
+        """
+        try:
+            if not hasattr(self, '_topic_query_agent'):
+                model, _ = select_model(
+                    getattr(config, 'QUIZ_MODEL_NAME', None) or "gemini-2.0-flash",
+                    getattr(config, 'API_KEY', None) or "",
+                )
+                self._topic_query_agent = Agent(model, output_type=List[str])
+            result = await self._topic_query_agent.run(prompt)
+            out = result.output if hasattr(result, 'output') else result
+            if isinstance(out, list) and out:
+                return [str(q) for q in out[:n]]
+        except Exception as e:
+            logger.warning(f"Error expanding topic queries for '{topic}': {e}")
+        return [topic]
+
+    async def _search_chunks_for_topic(
+        self, document_id: str, topic: str, top_k_per_query: int = 8
+    ) -> List[Dict[str, Any]]:
+        """Retrieve document chunks focused on a topic via multi-query vector
+        search, merging and deduping results across all expanded queries."""
+        doc_processor = get_document_processor()
+        queries = await self._expand_topic_queries(topic)
+        result_lists = await asyncio.gather(
+            *[
+                doc_processor.search_documents(query=q, document_id=document_id, top_k=top_k_per_query)
+                for q in queries
+            ],
+            return_exceptions=True
+        )
+        merged: List[Dict[str, Any]] = []
+        for r in result_lists:
+            if isinstance(r, Exception):
+                logger.warning(f"Topic search query failed for document {document_id}: {r}")
+                continue
+            merged.extend(r)
+        merged = dedup_text_snippets(merged, text_key="content")
+        return [
+            {
+                "content": item.get("content", ""),
+                "chunk_index": item.get("chunk_index", i),
+                "metadata": item,
+            }
+            for i, item in enumerate(merged)
+        ]
+
     async def _parse_document(
         self,
         text_content: Optional[str] = None,
@@ -808,7 +878,7 @@ class QuizAgent:
         
         try:
             if from_vector_db and document_id:
-                results = await doc_processor.get_chunks_for_document(document_id, top_k=100)
+                results = await doc_processor.get_chunks_for_document(document_id, top_k=250)
                 for i, result in enumerate(results):
                     chunks.append({
                         "content": result.get("content", ""),
@@ -845,7 +915,7 @@ class QuizAgent:
                 doc = await db.get_document_by_file_name(file_name, user_id)
                 if doc and doc.get("pinecone_index_name"):
                     doc_id = doc.get("id")
-                    results = await doc_processor.get_chunks_for_document(doc_id, top_k=100)
+                    results = await doc_processor.get_chunks_for_document(doc_id, top_k=250)
                     for i, result in enumerate(results):
                         chunks.append({
                             "content": result.get("content", ""),
@@ -854,7 +924,7 @@ class QuizAgent:
                         })
         
         except Exception as e:
-            print(f"Error parsing document: {e}")
+            logger.warning(f"Error parsing document: {e}")
         
         return chunks
     
@@ -885,8 +955,8 @@ class QuizAgent:
         # Initialize scoring agent if not exists or if model changed
         if self.scoring_agent is None or model_name or api_key:
             scoring_model = get_quiz_model(
-                model_name or self.model_name,
-                api_key or self.api_key,
+                model_name or self._model_name,
+                api_key or self._api_key,
             )
             self.scoring_agent = Agent(
                 scoring_model,

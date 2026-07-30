@@ -75,3 +75,27 @@
     @apply bg-background text-foreground;
   }
 }
+
+@keyframes waitlist-marquee {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+.waitlist-marquee-track {
+  width: max-content;
+  animation: waitlist-marquee 32s linear infinite;
+}
+
+.waitlist-marquee-track:hover {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .waitlist-marquee-track {
+    animation: none;
+  }
+}

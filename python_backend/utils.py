@@ -167,26 +167,29 @@ async def summarize_old_messages(
     return messages
 
 def _map_to_db_schema(
-    msg: Dict[str, Any], 
-    user_id: str, 
+    msg: Dict[str, Any],
+    user_id: str,
     conversation_id: str,
-    new_message_id: str, # NEW: The ID generated for the current message
-    parent_message_id_override: Optional[str] = None # NEW: The ID of the previous message in the batch
+    new_message_id: str,  # The ID generated for the current message
+    parent_message_id_override: Optional[str] = None,  # The ID of the previous message in the batch
 ) -> Dict[str, Any]:
-    """Maps a Pydantic-like chat message dictionary to the flat PostgreSQL 'chat_history' table schema."""
-    
+    """Maps a pydantic-ai message dict to snake_case fields matching the real
+    chat-history tables (game_master_chat_history / npc_chat_history /
+    tutor_chat_history — see db/scripts/init_db.sql). This is an intermediate
+    shape internal to save_chat_history_to_storage(); nothing else reads it."""
+
     # Extract core fields
-    kind = msg.get("kind", "request") # 'request' or 'response'
-    
+    kind = msg.get("kind", "request")  # 'request' or 'response'
+
     # Default message fields (assume single part for content)
     # Safely extract content from 'parts' list
     part = msg.get("parts", [{}])[0]
     content = part.get("content", "")
-    
+
     # Note: timestamp in the message 'part' is preferred, fallback to top-level key or now
     # Ensure timestamp is a datetime object if possible for isoformat()
-    raw_timestamp = part.get("timestamp") or msg.get("timestamp") 
-    timestamp = datetime.now() # Default fallback
+    raw_timestamp = part.get("timestamp") or msg.get("timestamp")
+    timestamp = datetime.now()  # Default fallback
     if isinstance(raw_timestamp, str):
         try:
             from dateutil import parser
@@ -197,55 +200,45 @@ def _map_to_db_schema(
     elif isinstance(raw_timestamp, datetime):
         timestamp = raw_timestamp
 
-    # Extract LLM-specific fields for Metadata
+    # Extract LLM-specific fields for metadata
     model_name = msg.get("model_name")
     usage = msg.get("usage", {})
     instructions = msg.get("instructions")
-    
-    # Calculate Token Count
+
+    # Calculate token count
     token_count = usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
-    
-    # Determine Role (DB Schema: 'user' or 'assistant')
+
+    # Determine role ('user' or 'assistant')
     role = "assistant" if kind == "response" else "user"
-    
-    # Collect all Pydantic fields that don't map directly to the flat DB schema
+
+    # Collect fields that don't map directly to a flat DB column
     metadata_fields = {
         "kind": kind,
         "instructions": instructions,
         "usage": usage,
         "part_kind": part.get("part_kind"),
-        "parent_message_id": msg.get("parent_message_id"),
         "uploaded_media": msg.get("uploaded_media"),
     }
     metadata_fields = {k: v for k, v in metadata_fields.items() if v is not None}
-    
-    # Explicitly map to the DB schema (MSSQL Catalog.Chats table with PascalCase columns)
+
     db_row = {
-        # Core DB Columns (PascalCase to match MSSQL schema)
-        "Id": new_message_id,
-        "ConversationId": str(conversation_id),
-        "UserId": str(user_id),
-        "Role": role,
-        "Message": content,
-        "CreatedOn": timestamp,
-        
-        # Optional/LLM Columns
-        "ModelUsed": model_name,
-        "TokenCount": token_count,
-        "IsVisible": True,
-        
-        # Foreign Keys/Relationships
-        "ParentMessageId": parent_message_id_override or msg.get("parent_message_id"),
-        
-        # Metadata (NVARCHAR(MAX) field storing JSON string)
-        "Metadata": json.dumps(metadata_fields) if metadata_fields else None
+        "id": new_message_id,
+        "conversation_id": str(conversation_id),
+        "user_id": str(user_id),
+        "role": role,
+        "message": content,
+        "created_at": timestamp,
+        "model_used": model_name,
+        "token_count": token_count,
+        "is_visible": True,
+        "parent_message_id": parent_message_id_override or msg.get("parent_message_id"),
+        "metadata": json.dumps(metadata_fields) if metadata_fields else None,
     }
 
     # Remove keys where the value is None to keep the insertion clean
     return {k: v for k, v in db_row.items() if v is not None}
 
 
-# --- UPDATED HELPER FUNCTION for DB Conversion with Threading Logic ---
 def _handle_db_conversion(
     flat_messages: List[Any],
     user_id: str,
@@ -254,49 +247,46 @@ def _handle_db_conversion(
     uploaded_media: Optional[Dict[str, Any]] = None,
 ) -> List[Dict]:
     """
-    Handles the two-step conversion required when to_json=True, including 
+    Handles the two-step conversion required when to_json=True, including
     managing sequential message IDs for thread chaining.
     """
     # 1. Convert to standard JSON-compatible dicts
     jsonable_messages = to_jsonable_python(flat_messages)
-    
-    # Removed logger reference - use print or logging module if needed
-    
+
     if is_old_session:
         return jsonable_messages
-    
+
     db_rows = []
-    # Tracks the ID of the message just mapped/created (used for the ParentMessageId of the *next* message)
-    last_message_id: Optional[str] = None 
+    # Tracks the ID of the message just mapped/created (used as the parent_message_id of the *next* message)
+    last_message_id: Optional[str] = None
 
     for i, msg in enumerate(jsonable_messages):
         msg = dict(msg) if isinstance(msg, dict) else msg
         if isinstance(msg, dict) and uploaded_media and msg.get("kind") == "response":
             msg = {**msg, "uploaded_media": uploaded_media}
-        current_message_id = msg.get("chat_id") or msg.get("Id") or str(uuid.uuid4())
+        current_message_id = msg.get("chat_id") or msg.get("id") or str(uuid.uuid4())
 
         # Determine the parent ID (Thread Chaining Logic):
         # 1. If the input message already specifies a parent_message_id (e.g., loaded from DB or a complex reply), use it.
         # 2. Otherwise, use the ID of the message we just processed (last_message_id).
-        input_parent_id = msg.get("parent_message_id") or msg.get("ParentMessageId")
-        
+        input_parent_id = msg.get("parent_message_id")
+
         # The parent ID used for the DB row is the explicit input, or the ID of the immediately preceding message in this batch.
         parent_id_for_db = input_parent_id if input_parent_id is not None else last_message_id
-        conversation_id = msg.get('conversation_id') or msg.get('ConversationId') or conversation_id
+        conversation_id = msg.get("conversation_id") or conversation_id
         # Map to DB schema using the explicit IDs
         db_row = _map_to_db_schema(
-            msg, 
-            user_id, 
-            conversation_id, 
-            new_message_id=current_message_id, 
+            msg,
+            user_id,
+            conversation_id,
+            new_message_id=current_message_id,
             parent_message_id_override=parent_id_for_db
         )
         db_rows.append(db_row)
         
         # Update the tracking variable for the next iteration
         last_message_id = current_message_id
-    
-    # Removed logger reference
+
     return db_rows
 
 
@@ -580,8 +570,8 @@ async def search_internet(query: str, api_key: Optional[str] = None) -> str:
                 
                 return "\n".join(results)
     except Exception as e:
-        print(f"Internet search error: {str(e)}")
-    
+        logger.warning(f"Internet search error: {e}")
+
     return ""
 
 
@@ -651,9 +641,9 @@ async def save_chat_history_to_storage(
                     user_id=user_id,
                     game_id=conversation_id,
                     session_id=conversation_id,
-                    role=row.get("Role", "user"),
-                    message=row.get("Message", ""),
-                    metadata=row.get("Metadata", {})
+                    role=row.get("role", "user"),
+                    message=row.get("message", ""),
+                    metadata=row.get("metadata", {})
                 )
         elif chat_type == "npc":
             if not npc_id:
@@ -664,9 +654,9 @@ async def save_chat_history_to_storage(
                     game_id=conversation_id,
                     npc_id=npc_id,
                     session_id=conversation_id,
-                    role=row.get("Role", "user"),
-                    message=row.get("Message", ""),
-                    metadata=row.get("Metadata", {})
+                    role=row.get("role", "user"),
+                    message=row.get("message", ""),
+                    metadata=row.get("metadata", {})
                 )
         elif chat_type == "tutor":
             doc_for_row = tutor_document_id or conversation_id
@@ -675,10 +665,10 @@ async def save_chat_history_to_storage(
                     user_id=user_id,
                     document_id=doc_for_row,
                     session_id=conversation_id,
-                    role=row.get("Role", "user"),
-                    message=row.get("Message", ""),
+                    role=row.get("role", "user"),
+                    message=row.get("message", ""),
                     sources=row.get("sources", []),
-                    metadata=row.get("Metadata", {})
+                    metadata=row.get("metadata", {})
                 )
         
         return True
@@ -758,7 +748,6 @@ async def get_chat_history_from_storage(
         return process_chat_history_for_model_inference(db_rows)
         
     except Exception as e:
-        import logging
-        logging.error(f"Failed to retrieve chat history: {e}")
+        logger.error(f"Failed to retrieve chat history: {e}")
         return []
 

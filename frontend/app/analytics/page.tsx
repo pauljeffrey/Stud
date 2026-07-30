@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/app/components/ui/card"
 import { Skeleton } from "@/app/components/ui/skeleton"
+import { apiFetch } from "@/app/lib/auth"
 import { Button } from "@/app/components/ui/button"
 import { Badge } from "@/app/components/ui/badge"
 import { Progress } from "@/app/components/ui/progress"
@@ -67,11 +68,7 @@ export default function AnalyticsPage() {
   const loadAnalytics = async () => {
     try {
       setIsLoading(true)
-      const response = await fetch(`/api/analytics?range=${timeRange}`, {
-        headers: {
-          Authorization: `Bearer ${localStorage.getItem("token")}`,
-        },
-      })
+      const response = await apiFetch(`/api/analytics?range=${timeRange}`)
 
       if (response.ok) {
         const data = await response.json()

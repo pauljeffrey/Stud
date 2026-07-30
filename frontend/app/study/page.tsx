@@ -8,11 +8,36 @@ import { Textarea } from "@/app/components/ui/textarea"
 import { Input } from "@/app/components/ui/input"
 import { Label } from "@/app/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/app/components/ui/select"
-import { Upload, Send, RotateCcw, FileText, Loader2, BookOpen, MessageCircle, Trash2, Plus } from "lucide-react"
+import { Upload, Send, RotateCcw, FileText, Loader2, BookOpen, MessageCircle, Trash2, Plus, Search } from "lucide-react"
 import { useRouter } from "next/navigation"
 import { useToast } from "@/app/components/ui/use-toast"
 import { useDropzone } from "react-dropzone"
 import { motion } from "framer-motion"
+import {
+  fetchAccountCredentials,
+  resolveCredentials,
+  resolveModelFields,
+  toModelConfig,
+} from "@/app/lib/api-credentials"
+import { useAuth, apiFetch, getToken } from "@/app/lib/auth"
+import { readApiError, readSseStream } from "@/app/lib/game-state"
+import { DocumentPicker, type PickerDoc } from "@/app/components/document-picker"
+import { FreeModelNotice } from "@/app/components/free-model-notice"
+
+const MAX_UPLOAD_MB = 10
+const ANON_ID_KEY = "stud_anon_study_id"
+
+/** Stable per-browser id for anonymous (logged-out) study sessions, so two
+ *  anonymous users never share the same uploaded documents/chat history. */
+function getOrCreateAnonId(): string {
+  if (typeof window === "undefined") return "anon"
+  let id = localStorage.getItem(ANON_ID_KEY)
+  if (!id) {
+    id = `anon_${crypto.randomUUID()}`
+    localStorage.setItem(ANON_ID_KEY, id)
+  }
+  return id
+}
 const StudyPdfPanel = dynamic(
   () => import("./study-pdf-panel").then((mod) => ({ default: mod.StudyPdfPanel })),
   { ssr: false, loading: () => <Loader2 className="animate-spin text-purple-400" /> }
@@ -27,13 +52,22 @@ interface ChatMessage {
 
 export default function StudyPage() {
   const router = useRouter()
+  const { user } = useAuth()
   const [document, setDocument] = useState<File | null>(null)
   const [documentId, setDocumentId] = useState<string | null>(null)
+  const [processingStatus, setProcessingStatus] = useState<"queued" | "ready" | "failed" | null>(null)
   const [documentContent, setDocumentContent] = useState<string>("")
+  // Set when a document is chosen via the library/own-documents picker
+  // instead of dropped in as a raw File — no local bytes to preview.
+  const [pickedDoc, setPickedDoc] = useState<PickerDoc | null>(null)
+  const [showPicker, setShowPicker] = useState(false)
+  const [isSuggesting, setIsSuggesting] = useState(false)
+  const [suggested, setSuggested] = useState(false)
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
   const [userInput, setUserInput] = useState("")
   const [isLoading, setIsLoading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState(0)
+  const [isGeneratingQuiz, setIsGeneratingQuiz] = useState(false)
   const [chatPosition, setChatPosition] = useState<"right" | "left">("right")
   const [numPages, setNumPages] = useState<number>(0)
   const [pageNumber, setPageNumber] = useState<number>(1)
@@ -45,6 +79,22 @@ export default function StudyPage() {
   const { toast } = useToast()
   const chatEndRef = useRef<HTMLDivElement>(null)
   const documentViewerRef = useRef<HTMLDivElement>(null)
+  const [hasSavedCreds, setHasSavedCreds] = useState(false)
+  const [anonId] = useState(getOrCreateAnonId)
+
+  const studyUserId = user?.id || anonId
+
+  useEffect(() => {
+    const apply = (creds: ReturnType<typeof resolveCredentials>) => {
+      if (creds) {
+        setModelConfig(toModelConfig(creds))
+        setHasSavedCreds(true)
+      }
+    }
+    apply(resolveCredentials())
+    const token = getToken()
+    if (token) fetchAccountCredentials(token).then(apply).catch(() => {})
+  }, [])
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -59,10 +109,21 @@ export default function StudyPage() {
       "text/plain": [".txt"],
       "image/*": [".png", ".jpg", ".jpeg"]
     },
+    maxSize: MAX_UPLOAD_MB * 1024 * 1024,
     onDrop: async (acceptedFiles) => {
       if (acceptedFiles.length > 0) {
         await handleFileUpload(acceptedFiles[0])
       }
+    },
+    onDropRejected: (rejections) => {
+      const tooLarge = rejections.some((r) => r.errors.some((e) => e.code === "file-too-large"))
+      toast({
+        title: tooLarge ? "File too large" : "File not accepted",
+        description: tooLarge
+          ? `Documents must be ${MAX_UPLOAD_MB}MB or smaller.`
+          : "Please upload a PDF, DOCX, PPTX, TXT, or image file.",
+        variant: "destructive"
+      })
     },
     multiple: false
   })
@@ -75,18 +136,21 @@ export default function StudyPage() {
       const formData = new FormData()
       formData.append("file", file)
       formData.append("document_id", `doc_${Date.now()}`)
-      formData.append("user_id", "user_123") // TODO: Get from auth
+      formData.append("user_id", studyUserId)
 
-      const response = await fetch("/api/learning/upload", {
+      const response = await apiFetch("/api/learning/upload", {
         method: "POST",
         body: formData
       })
 
-      if (!response.ok) throw new Error("Upload failed")
+      if (!response.ok) throw new Error(await readApiError(response))
 
       const data = await response.json()
       setDocumentId(data.document_id)
       setDocument(file)
+      setPickedDoc(null)
+      setSuggested(false)
+      setProcessingStatus(data.status === "ready" ? "ready" : "queued")
 
       // Extract text for preview (simplified - in production use proper extraction)
       if (file.type === "text/plain") {
@@ -94,14 +158,21 @@ export default function StudyPage() {
         setDocumentContent(text)
       }
 
-      toast({
-        title: "Document uploaded",
-        description: `Processed ${data.chunk_count} chunks. Expires in 2 hours.`
-      })
+      if (data.status === "ready") {
+        toast({
+          title: "Document ready",
+          description: `Processed ${data.chunk_count ?? ""} chunks. You can start chatting now.`
+        })
+      } else {
+        toast({
+          title: "Document uploaded",
+          description: "We're processing it in the background — we'll notify you when it's ready to chat with."
+        })
+      }
     } catch (error) {
       toast({
         title: "Upload failed",
-        description: "Failed to upload document",
+        description: error instanceof Error ? error.message : "Failed to upload document",
         variant: "destructive"
       })
     } finally {
@@ -109,6 +180,29 @@ export default function StudyPage() {
       setUploadProgress(0)
     }
   }
+
+  // Poll the document's processing status while it's still queued, so the
+  // chat/quiz UI unlocks automatically without the user having to refresh.
+  useEffect(() => {
+    if (!documentId || processingStatus !== "queued") return
+    const interval = setInterval(async () => {
+      try {
+        const res = await apiFetch("/api/learning/documents")
+        if (!res.ok) return
+        const data = await res.json()
+        const doc = (data.documents || []).find((d: { id: string }) => d.id === documentId)
+        if (!doc) return
+        if (doc.processed) {
+          setProcessingStatus("ready")
+        } else if (doc.processing_status === "failed") {
+          setProcessingStatus("failed")
+        }
+      } catch {
+        /* keep polling */
+      }
+    }, 8000)
+    return () => clearInterval(interval)
+  }, [documentId, processingStatus])
 
   const handleChat = async () => {
     if (!userInput.trim() || !documentId) return
@@ -124,60 +218,50 @@ export default function StudyPage() {
     ])
 
     try {
-      const response = await fetch("/api/learning/chat", {
+      const response = await apiFetch("/api/learning/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           document_id: documentId,
           message: userMessage,
-          chat_history: chatMessages.map(m => ({ role: m.role, content: m.content }))
+          chat_history: chatMessages.map(m => ({ role: m.role, content: m.content })),
+          ...resolveModelFields(modelConfig),
         })
       })
 
-      if (!response.ok) throw new Error("Chat failed")
+      if (!response.ok) throw new Error(await readApiError(response))
 
-      const reader = response.body?.getReader()
-      const decoder = new TextDecoder()
       let accumulatedResponse = ""
-
-      if (reader) {
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-
-          const chunk = decoder.decode(value)
-          const lines = chunk.split("\n")
-
-          for (const line of lines) {
-            if (line.startsWith("data: ")) {
-              const data = JSON.parse(line.slice(6))
-              accumulatedResponse += data.content
-
-              // Update last message or add new one
-              setChatMessages((prev) => {
-                const newMessages = [...prev]
-                const lastMsg = newMessages[newMessages.length - 1]
-                if (lastMsg?.role === "assistant") {
-                  lastMsg.content = accumulatedResponse
-                  if (data.sources) lastMsg.sources = data.sources
-                } else {
-                  newMessages.push({
-                    role: "assistant",
-                    content: accumulatedResponse,
-                    sources: data.sources,
-                    timestamp: new Date()
-                  })
-                }
-                return newMessages
-              })
-            }
+      await readSseStream(response, (data) => {
+        accumulatedResponse += (data.content as string) ?? ""
+        setChatMessages((prev) => {
+          const newMessages = [...prev]
+          const lastMsg = newMessages[newMessages.length - 1]
+          if (lastMsg?.role === "assistant") {
+            lastMsg.content = accumulatedResponse
+            if (data.sources) lastMsg.sources = data.sources as string[]
+          } else {
+            newMessages.push({
+              role: "assistant",
+              content: accumulatedResponse,
+              sources: data.sources as string[] | undefined,
+              timestamp: new Date()
+            })
           }
+          return newMessages
+        })
+
+        if (data.complete && data.generate_quiz) {
+          toast({
+            title: "Ready to test yourself?",
+            description: "Click \"Generate Quiz\" above to spin up a quiz from this discussion.",
+          })
         }
-      }
+      })
     } catch (error) {
       toast({
         title: "Error",
-        description: "Failed to get response",
+        description: error instanceof Error ? error.message : "Failed to get response",
         variant: "destructive"
       })
     } finally {
@@ -189,16 +273,19 @@ export default function StudyPage() {
     if (!documentId) return
 
     try {
-      const response = await fetch(`/api/learning/documents/${documentId}`, {
+      const response = await apiFetch(`/api/learning/documents/${documentId}`, {
         method: "DELETE"
       })
 
-      if (!response.ok) throw new Error("Delete failed")
+      if (!response.ok) throw new Error(await readApiError(response))
 
       setDocument(null)
       setDocumentId(null)
+      setProcessingStatus(null)
       setDocumentContent("")
       setChatMessages([])
+      setPickedDoc(null)
+      setSuggested(false)
 
       toast({
         title: "Document deleted",
@@ -207,14 +294,101 @@ export default function StudyPage() {
     } catch (error) {
       toast({
         title: "Error",
-        description: "Failed to delete document",
+        description: error instanceof Error ? error.message : "Failed to delete document",
         variant: "destructive"
       })
     }
   }
 
+  /** Choosing a document from the central library / "your documents" picker
+   *  — no local File bytes, so the viewer shows a reference card instead of
+   *  a PDF preview. */
+  const handleSelectLibraryDoc = (doc: PickerDoc) => {
+    setDocument(null)
+    setDocumentId(doc.id)
+    setProcessingStatus("ready")
+    setDocumentContent("")
+    setChatMessages([])
+    setPickedDoc(doc)
+    setSuggested(false)
+    setShowPicker(false)
+  }
+
+  const handleSuggestForLibrary = async () => {
+    if (!documentId) return
+    setIsSuggesting(true)
+    try {
+      const response = await apiFetch(`/api/learning/documents/${documentId}/suggest-global`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      })
+      if (!response.ok) throw new Error(await readApiError(response))
+      setSuggested(true)
+      toast({ title: "Thanks!", description: "We'll review this for the central library." })
+    } catch (error) {
+      toast({
+        title: "Couldn't submit suggestion",
+        description: error instanceof Error ? error.message : "Please try again",
+        variant: "destructive",
+      })
+    } finally {
+      setIsSuggesting(false)
+    }
+  }
+
   const onDocumentLoadSuccess = ({ numPages }: { numPages: number }) => {
     setNumPages(numPages)
+  }
+
+  /** If a document is uploaded, generate a quiz grounded in it — and in
+   *  whatever's been discussed in the chat so far, if anything — then hand
+   *  off to /quiz preloaded. Falls back to the blank quiz-config page when
+   *  there's no document yet. */
+  const handleCreateQuizClick = async () => {
+    if (!documentId) {
+      router.push("/quiz")
+      return
+    }
+    if (processingStatus !== "ready") {
+      toast({
+        title: "Still processing",
+        description: "This document isn't ready yet — we'll notify you when it is.",
+        variant: "destructive",
+      })
+      return
+    }
+    setIsGeneratingQuiz(true)
+    try {
+      const formData = new FormData()
+      formData.append("document_id", documentId)
+      formData.append("user_id", studyUserId)
+
+      const recentDiscussion = chatMessages
+        .slice(-12)
+        .map((m) => `${m.role === "user" ? "Learner" : "Tutor"}: ${m.content}`)
+        .join("\n")
+        .slice(0, 4000)
+      if (recentDiscussion) formData.append("chat_context", recentDiscussion)
+
+      const response = await apiFetch("/api/learning/generate-quiz-from-document", {
+        method: "POST",
+        body: formData,
+      })
+      if (!response.ok) throw new Error(await readApiError(response))
+
+      const quizData = await response.json()
+      sessionStorage.setItem("quiz_pending", JSON.stringify(quizData))
+      router.push("/quiz")
+    } catch (error) {
+      toast({
+        title: "Couldn't generate quiz",
+        description: error instanceof Error ? error.message : "Failed to generate quiz from this document",
+        variant: "destructive"
+      })
+    } finally {
+      setIsGeneratingQuiz(false)
+    }
   }
 
   return (
@@ -300,12 +474,17 @@ export default function StudyPage() {
               Rotate Sections
             </Button>
             <Button
-              onClick={() => router.push("/quiz")}
+              onClick={handleCreateQuizClick}
+              disabled={isGeneratingQuiz}
               variant="outline"
               className="border-purple-700/40"
             >
-              <Plus className="h-4 w-4 mr-2" />
-              Create Quiz
+              {isGeneratingQuiz ? (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <Plus className="h-4 w-4 mr-2" />
+              )}
+              {documentId ? "Generate Quiz" : "Create Quiz"}
             </Button>
             <Button
               onClick={() => router.push("/demo")}
@@ -316,6 +495,8 @@ export default function StudyPage() {
             </Button>
           </div>
         </div>
+
+        <FreeModelNotice className="mb-3" />
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 h-[calc(100vh-8rem)]">
           {/* Document Viewer - Left */}
@@ -332,7 +513,7 @@ export default function StudyPage() {
                     <FileText className="h-5 w-5" />
                     Document Viewer
                   </CardTitle>
-                  {document && (
+                  {(document || pickedDoc) && (
                     <Button
                       onClick={handleDeleteDocument}
                       variant="ghost"
@@ -345,65 +526,90 @@ export default function StudyPage() {
                 </div>
               </CardHeader>
               <CardContent className="flex-1 overflow-y-auto">
-                {!document ? (
-                  <div
-                    {...getRootProps()}
-                    className={`border-2 border-dashed rounded-lg p-12 text-center cursor-pointer transition-colors ${
-                      isDragActive
-                        ? "border-purple-500 bg-purple-900/20"
-                        : "border-purple-700/40 hover:border-purple-500/60"
-                    }`}
-                  >
-                    <input {...getInputProps()} />
-                    <motion.div
-                      animate={{
-                        scale: [1, 1.02, 1],
-                      }}
-                      transition={{
-                        duration: 3,
-                        repeat: Infinity,
-                        ease: "easeInOut"
-                      }}
-                    >
-                    <motion.div
-                      animate={{
-                        y: [0, -10, 0],
-                        rotate: [0, 5, -5, 0],
-                      }}
-                      transition={{
-                        duration: 3,
-                        repeat: Infinity,
-                        ease: "easeInOut"
-                      }}
-                    >
-                      <Upload className="h-12 w-12 mx-auto mb-4 text-purple-400" />
-                    </motion.div>
-                    </motion.div>
-                    <motion.p 
-                      className="text-lg mb-2"
-                      animate={{
-                        scale: [1, 1.05, 1],
-                      }}
-                      transition={{
-                        duration: 2.5,
-                        repeat: Infinity,
-                        ease: "easeInOut",
-                        delay: 0.5
-                      }}
-                    >
-                      {isDragActive ? "Drop file here" : "Drag & drop document here"}
-                    </motion.p>
+                {!document && pickedDoc ? (
+                  <div className="border border-purple-700/40 rounded-lg p-12 text-center space-y-2">
+                    <FileText className="h-12 w-12 mx-auto mb-2 text-purple-400" />
+                    <p className="text-lg">{pickedDoc.file_name}</p>
                     <p className="text-sm text-gray-400">
-                      Supports PDF, DOCX, PPT, TXT, Images
+                      {pickedDoc.scope === "global"
+                        ? "Central library document — grounding your study session."
+                        : "Your document — grounding your study session."}
                     </p>
-                    <motion.div
-                      whileHover={{ scale: 1.05 }}
-                      whileTap={{ scale: 0.95 }}
+                  </div>
+                ) : !document ? (
+                  <div className="space-y-3">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="w-full border-purple-700/40 text-purple-300"
+                      onClick={() => setShowPicker((v) => !v)}
                     >
-                      <Button className="mt-4 bg-purple-700 hover:bg-purple-800">
-                        Select File
-                      </Button>
-                    </motion.div>
+                      <Search className="h-4 w-4 mr-2" />
+                      {showPicker ? "Hide library" : "Browse central library / your documents"}
+                    </Button>
+                    {showPicker && (
+                      <DocumentPicker selectedId={documentId} onSelect={handleSelectLibraryDoc} />
+                    )}
+                    <div
+                      {...getRootProps()}
+                      className={`border-2 border-dashed rounded-lg p-12 text-center cursor-pointer transition-colors ${
+                        isDragActive
+                          ? "border-purple-500 bg-purple-900/20"
+                          : "border-purple-700/40 hover:border-purple-500/60"
+                      }`}
+                    >
+                      <input {...getInputProps()} />
+                      <motion.div
+                        animate={{
+                          scale: [1, 1.02, 1],
+                        }}
+                        transition={{
+                          duration: 3,
+                          repeat: Infinity,
+                          ease: "easeInOut"
+                        }}
+                      >
+                      <motion.div
+                        animate={{
+                          y: [0, -10, 0],
+                          rotate: [0, 5, -5, 0],
+                        }}
+                        transition={{
+                          duration: 3,
+                          repeat: Infinity,
+                          ease: "easeInOut"
+                        }}
+                      >
+                        <Upload className="h-12 w-12 mx-auto mb-4 text-purple-400" />
+                      </motion.div>
+                      </motion.div>
+                      <motion.p
+                        className="text-lg mb-2"
+                        animate={{
+                          scale: [1, 1.05, 1],
+                        }}
+                        transition={{
+                          duration: 2.5,
+                          repeat: Infinity,
+                          ease: "easeInOut",
+                          delay: 0.5
+                        }}
+                      >
+                        {isDragActive ? "Drop file here" : "Drag & drop document here"}
+                      </motion.p>
+                      <p className="text-sm text-gray-400">
+                        Supports PDF, DOCX, PPT, TXT, Images
+                      </p>
+                      <motion.div
+                        whileHover={{ scale: 1.05 }}
+                        whileTap={{ scale: 0.95 }}
+                      >
+                        <Button className="mt-4 bg-purple-700 hover:bg-purple-800">
+                          Select File
+                        </Button>
+                      </motion.div>
+                    </div>
                   </div>
                 ) : document.type === "application/pdf" ? (
                   <div ref={documentViewerRef} className="space-y-4">
@@ -445,6 +651,33 @@ export default function StudyPage() {
                     </pre>
                   </div>
                 )}
+                {documentId &&
+                  processingStatus === "ready" &&
+                  !(pickedDoc && pickedDoc.scope === "global") && (
+                    <div className="mt-3 flex items-center justify-between gap-2 text-xs bg-purple-950/30 border border-purple-700/30 rounded-lg px-3 py-2">
+                      <span className="text-gray-400">
+                        Think this should be part of our standard central library?
+                      </span>
+                      {suggested ? (
+                        <span className="text-green-400 shrink-0">Suggested ✓</span>
+                      ) : (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="border-purple-700/40 shrink-0"
+                          onClick={handleSuggestForLibrary}
+                          disabled={isSuggesting}
+                        >
+                          {isSuggesting ? (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          ) : (
+                            "Suggest for library"
+                          )}
+                        </Button>
+                      )}
+                    </div>
+                  )}
               </CardContent>
             </Card>
           </motion.div>
@@ -556,6 +789,20 @@ export default function StudyPage() {
 
                 {/* Input Area */}
                 <div className="space-y-2">
+                  {documentId && processingStatus && processingStatus !== "ready" && (
+                    <p className="text-xs text-purple-300 flex items-center gap-1.5">
+                      {processingStatus === "queued" ? (
+                        <>
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                          Still processing this document — we'll notify you when it's ready to chat with.
+                        </>
+                      ) : (
+                        <span className="text-red-400">
+                          Processing failed for this document. Try deleting and re-uploading it.
+                        </span>
+                      )}
+                    </p>
+                  )}
                   <Textarea
                     value={userInput}
                     onChange={(e) => setUserInput(e.target.value)}
@@ -563,12 +810,12 @@ export default function StudyPage() {
                     placeholder="Ask a question about the document..."
                     className="bg-black/50 border-purple-700/40 resize-none"
                     rows={3}
-                    disabled={!documentId || isLoading}
+                    disabled={!documentId || processingStatus !== "ready" || isLoading}
                   />
                   <div className="flex gap-2">
                     <Button
                       onClick={handleChat}
-                      disabled={!documentId || isLoading || !userInput.trim()}
+                      disabled={!documentId || processingStatus !== "ready" || isLoading || !userInput.trim()}
                       className="flex-1 bg-gradient-to-r from-purple-600 to-pink-600"
                     >
                       <Send className="h-4 w-4 mr-2" />
@@ -578,6 +825,7 @@ export default function StudyPage() {
                 </div>
 
                 {/* Model Configuration */}
+                {!hasSavedCreds && (
                 <div className="mt-4 pt-4 border-t border-purple-700/40 space-y-2">
                   <Label className="text-xs text-gray-400">Model Configuration (Optional)</Label>
                   <div className="grid grid-cols-2 gap-2">
@@ -602,6 +850,7 @@ export default function StudyPage() {
                     />
                   </div>
                 </div>
+                )}
               </CardContent>
             </Card>
           </motion.div>

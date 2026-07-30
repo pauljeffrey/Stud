@@ -77,21 +77,23 @@ class CleanupService:
     
     async def cleanup_expired_documents(self) -> Dict[str, Any]:
         """
-        Find and delete expired documents.
-        Documents expire after 2 hours in vector DB (Pinecone).
+        Find and delete documents whose vector index has passed its configured
+        expiry (`pinecone_index_expires_at`, set from PINECONE_INDEX_EXPIRATION_HOURS).
         Files are kept in S3 (if enabled) for re-ingestion.
-        
+
         This is automatically triggered every hour via background task in main.py
         """
         try:
-            # Find expired documents using database service
-            expired_threshold = datetime.now() - timedelta(hours=2)
-            
+            # Find expired documents using database service.
+            # pinecone_index_expires_at is stored as a naive isoformat timestamp
+            # (see document_processor.py), so compare against naive now() to match.
+            now = datetime.now()
+
             all_docs = await self.db_service.get_all_documents_admin(limit=1000)
             expired_docs = [
                 doc for doc in all_docs
-                if doc.get("pinecone_index_expires_at") and 
-                datetime.fromisoformat(doc["pinecone_index_expires_at"].replace('Z', '+00:00')) < expired_threshold
+                if doc.get("pinecone_index_expires_at") and
+                datetime.fromisoformat(doc["pinecone_index_expires_at"].replace('Z', '+00:00')) < now
             ]
             
             deleted_count = 0

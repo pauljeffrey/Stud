@@ -88,7 +88,7 @@ def platform_default_credentials() -> ResolvedModelCredentials:
     model_name = (
         getattr(config, "GAME_MASTER_MODEL_NAME", None)
         or os.getenv("MODEL_NAME")
-        or "nvidia/nemotron-3-nano-30b-a3b:free"
+        or "meta-llama/llama-3.3-70b-instruct:free"
     )
     api_key = (
         os.getenv("OPENROUTER_API_KEY")
@@ -111,8 +111,12 @@ def resolve_game_credentials(
     api_key: Optional[str],
     provider: Optional[str] = "google",
 ) -> ResolvedModelCredentials:
-    """Demo: invalid/missing user creds → platform .env default. Registered: must be valid."""
-    ok, reason = validate_user_credentials(model_name, api_key, provider)
+    """Valid user creds are always used. Otherwise fall back to the platform's
+    free default model for everyone — demo and registered users alike — so
+    nobody is blocked from playing just because they haven't added their own
+    API key yet. `is_demo` is accepted for callers/logging but no longer
+    gates the fallback."""
+    ok, _ = validate_user_credentials(model_name, api_key, provider)
     if ok:
         return ResolvedModelCredentials(
             model_name=(model_name or "").strip(),
@@ -121,7 +125,4 @@ def resolve_game_credentials(
             used_platform_default=False,
         )
 
-    if is_demo:
-        return platform_default_credentials()
-
-    raise ValueError(reason)
+    return platform_default_credentials()

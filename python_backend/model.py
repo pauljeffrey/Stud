@@ -37,7 +37,7 @@ _DEFAULT_OR_SETTINGS = OpenRouterModelSettings(
 def _base_model_settings() -> ModelSettings:
     return ModelSettings(timeout=float(os.getenv("MODEL_TIMEOUT", "180")))
 
-_DEFAULT_MODEL = "nvidia/nemotron-3-nano-30b-a3b:free"
+_DEFAULT_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
 
 
 def select_model(MODEL_NAME, API_KEY):

@@ -5,6 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/app
 import { Button } from "@/app/components/ui/button"
 import { Badge } from "@/app/components/ui/badge"
 import { Skeleton } from "@/app/components/ui/skeleton"
+import { apiFetch } from "@/app/lib/auth"
 import { Input } from "@/app/components/ui/input"
 import { Label } from "@/app/components/ui/label"
 import {
@@ -63,11 +64,7 @@ export default function CheckpointsPage() {
   const loadCheckpoints = async () => {
     try {
       setIsLoading(true)
-      const response = await fetch("/api/game/checkpoints", {
-        headers: {
-          Authorization: `Bearer ${localStorage.getItem("token")}`,
-        },
-      })
+      const response = await apiFetch("/api/game/checkpoints")
 
       if (response.ok) {
         const data = await response.json()
@@ -110,16 +107,19 @@ export default function CheckpointsPage() {
 
   const handleLoadCheckpoint = async (checkpointId: string) => {
     try {
-      const response = await fetch(`/api/game/load-checkpoint/${checkpointId}`, {
-        headers: {
-          Authorization: `Bearer ${localStorage.getItem("token")}`,
-        },
-      })
+      const response = await apiFetch(`/api/game/checkpoints/${checkpointId}`)
 
       if (response.ok) {
         const data = await response.json()
-        // Redirect to game with checkpoint loaded
-        window.location.href = `/game?checkpoint=${checkpointId}`
+        const gameState = data.game_state
+        const gameId = gameState?.game_id
+        if (!gameId) throw new Error("Checkpoint has no game state to resume")
+
+        sessionStorage.setItem(
+          `game_init_${gameId}`,
+          JSON.stringify({ success: true, game_state: gameState })
+        )
+        window.location.href = `/mediquest?game_id=${gameId}`
       } else {
         toast({
           title: "Error",
@@ -130,7 +130,7 @@ export default function CheckpointsPage() {
     } catch (error) {
       toast({
         title: "Error",
-        description: "Failed to load checkpoint.",
+        description: error instanceof Error ? error.message : "Failed to load checkpoint.",
         variant: "destructive",
       })
     }
@@ -138,11 +138,8 @@ export default function CheckpointsPage() {
 
   const handleDeleteCheckpoint = async (checkpointId: string) => {
     try {
-      const response = await fetch(`/api/game/checkpoints/${checkpointId}`, {
+      const response = await apiFetch(`/api/game/checkpoints/${checkpointId}`, {
         method: "DELETE",
-        headers: {
-          Authorization: `Bearer ${localStorage.getItem("token")}`,
-        },
       })
 
       if (response.ok) {
@@ -201,7 +198,7 @@ export default function CheckpointsPage() {
             <p className="text-purple-200 text-lg">Save and resume your game progress</p>
           </div>
           <div className="flex gap-4">
-            <Link href="/game">
+            <Link href="/demo">
               <Button className="bg-purple-600 hover:bg-purple-700">
                 <Play className="h-4 w-4 mr-2" />
                 New Game
@@ -223,7 +220,7 @@ export default function CheckpointsPage() {
               <Save className="h-16 w-16 mx-auto mb-4 text-purple-400 opacity-50" />
               <h3 className="text-xl font-semibold mb-2">No Checkpoints Yet</h3>
               <p className="text-purple-200 mb-6">Start a game and save checkpoints to resume later</p>
-              <Link href="/game">
+              <Link href="/demo">
                 <Button className="bg-purple-600 hover:bg-purple-700">
                   <Play className="h-4 w-4 mr-2" />
                   Start New Game

@@ -1,8 +1,6 @@
 import { NextResponse } from "next/server"
 import { PYTHON_BACKEND_URL } from "@/app/lib/proxy"
-import { sessionCookieSuffix } from "@/app/lib/session-cookie"
 
-const SESSION_COOKIE_MAX_AGE = 7 * 24 * 60 * 60 // 7 days
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
 export async function POST(request: Request) {
@@ -59,23 +57,12 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: false, message }, { status: response.status })
     }
 
-    const headers = new Headers()
-    if (data.session_token) {
-      headers.set(
-        "Set-Cookie",
-        `session_token=${data.session_token}; ${sessionCookieSuffix(SESSION_COOKIE_MAX_AGE)}`
-      )
-    }
-    return NextResponse.json(
-      {
-        success: true,
-        message: data.message || "User registered successfully",
-        user: data.user,
-        token: data.token,
-        session_token: data.session_token,
-      },
-      { headers }
-    )
+    return NextResponse.json({
+      success: true,
+      message: data.message || "User registered successfully",
+      user: data.user,
+      token: data.token,
+    })
   } catch (error) {
     console.error("Registration error:", error)
     return NextResponse.json(

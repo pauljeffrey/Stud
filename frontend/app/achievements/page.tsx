@@ -8,6 +8,7 @@ import { Skeleton } from "@/app/components/ui/skeleton"
 import { Button } from "@/app/components/ui/button"
 import { Trophy, Sparkles, CheckCircle2, XCircle, Filter } from "lucide-react"
 import Link from "next/link"
+import { apiFetch } from "@/app/lib/auth"
 import {
   Select,
   SelectContent,
@@ -44,11 +45,7 @@ export default function AchievementsPage() {
     try {
       setIsLoading(true)
       // Fetch from backend
-      const response = await fetch("/api/achievements", {
-        headers: {
-          Authorization: `Bearer ${localStorage.getItem("token")}`,
-        },
-      })
+      const response = await apiFetch("/api/achievements")
 
       if (response.ok) {
         const data = await response.json()

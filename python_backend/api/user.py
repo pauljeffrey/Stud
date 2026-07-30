@@ -6,16 +6,18 @@ All Supabase calls run on the default thread executor so they don't
 block the FastAPI event loop under high concurrency.
 """
 import asyncio
-from datetime import datetime
+import logging
+from datetime import datetime, timedelta
 from typing import Optional, Any, Dict, List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from api.auth_deps import get_current_user_id, invalidate_user_cache
 from service.database import get_database_service
 from service.crypto_service import encrypt_field, decrypt_field
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -84,7 +86,8 @@ async def get_user_stats(user_id: str = Depends(get_current_user_id)):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch user stats: {e}")
+        logger.exception("Failed to fetch user stats")
+        raise HTTPException(status_code=500, detail="Failed to fetch user stats")
 
 
 @router.get("/user/recent-games")
@@ -121,7 +124,8 @@ async def get_recent_games(
             })
         return {"success": True, "games": games}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch recent games: {e}")
+        logger.exception("Failed to fetch recent games")
+        raise HTTPException(status_code=500, detail="Failed to fetch recent games")
 
 
 @router.get("/user/recent-quizzes")
@@ -154,7 +158,8 @@ async def get_recent_quizzes(
             })
         return {"success": True, "quizzes": quizzes}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch recent quizzes: {e}")
+        logger.exception("Failed to fetch recent quizzes")
+        raise HTTPException(status_code=500, detail="Failed to fetch recent quizzes")
 
 
 @router.get("/user/recent-activities")
@@ -262,7 +267,8 @@ async def get_user_settings(user_id: str = Depends(get_current_user_id)):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch settings: {e}")
+        logger.exception("Failed to fetch settings")
+        raise HTTPException(status_code=500, detail="Failed to fetch settings")
 
 
 @router.put("/user/settings")
@@ -297,4 +303,206 @@ async def update_user_settings(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update settings: {e}")
+        logger.exception("Failed to update settings")
+        raise HTTPException(status_code=500, detail="Failed to update settings")
+
+
+class ProfileUpdate(BaseModel):
+    name: Optional[str] = None
+    profession: Optional[str] = None
+    bio: Optional[str] = None
+    age: Optional[int] = None
+    email: Optional[str] = None
+
+
+_PROFILE_PUBLIC_FIELDS = ("id", "email", "name", "profession", "age", "avatar_url", "bio", "created_at")
+
+
+@router.put("/user/profile")
+async def update_profile(payload: ProfileUpdate, user_id: str = Depends(get_current_user_id)):
+    """Update editable profile fields."""
+    db = get_database_service()
+    try:
+        updates = payload.model_dump(exclude_none=True)
+        if updates:
+            updates["updated_at"] = datetime.now().isoformat()
+            try:
+                await db.update_user(user_id, updates)
+            except Exception as e:
+                if "duplicate" in str(e).lower() or "unique" in str(e).lower():
+                    raise HTTPException(status_code=400, detail="That email is already in use")
+                raise
+            await invalidate_user_cache(user_id)
+
+        user = await db.get_user(user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        return {"success": True, "user": {k: user.get(k) for k in _PROFILE_PUBLIC_FIELDS}}
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Failed to update profile")
+        raise HTTPException(status_code=500, detail="Failed to update profile")
+
+
+@router.get("/user/achievements")
+async def get_achievements(user_id: str = Depends(get_current_user_id)):
+    """Real achievements: each definition's criteria checked against the
+    user's current stats. Newly-met criteria are persisted to
+    user_achievements so unlocked_at stays stable across requests."""
+    db = get_database_service()
+    try:
+        defs, game_stats, quiz_stats, progression, docs, unlocks = await asyncio.gather(
+            db.list_achievement_definitions(),
+            db.get_game_statistics(user_id),
+            db.get_quiz_statistics(user_id),
+            db.get_user_progression(user_id),
+            db.get_user_documents(user_id, limit=1000),
+            db.get_user_achievement_unlocks(user_id),
+        )
+        game_stats = game_stats or {}
+        quiz_stats = quiz_stats or {}
+        progression = progression or {}
+
+        stats = {
+            "games_completed": int(game_stats.get("games_completed") or 0),
+            "games_created": int(game_stats.get("games_created") or 0),
+            "quizzes_taken": int(quiz_stats.get("quizzes_taken") or 0),
+            "quizzes_passed": int(quiz_stats.get("quizzes_passed") or 0),
+            "quiz_highest_score": float(quiz_stats.get("highest_score") or 0),
+            "total_learning_hours": float(progression.get("total_learning_hours") or 0),
+            "documents_uploaded": len(docs),
+        }
+
+        result = []
+        for d in defs:
+            criteria = d.get("criteria") or {}
+            metric = criteria.get("metric")
+            threshold = criteria.get("threshold", 1)
+            current_value = stats.get(metric, 0)
+            now_unlocked = current_value >= threshold
+
+            existing = unlocks.get(d["id"])
+            was_unlocked = bool(existing and existing.get("unlocked"))
+            earned_at = existing.get("unlocked_at") if existing else None
+
+            if now_unlocked and not was_unlocked:
+                earned_at = datetime.now().isoformat()
+                try:
+                    await db.upsert_user_achievement_unlock(
+                        user_id, d["id"], {"value": current_value}, True
+                    )
+                except Exception:
+                    logger.warning("Failed to persist achievement unlock %s for %s", d["id"], user_id)
+
+            result.append({
+                "id": d["id"],
+                "name": d["name"],
+                "description": d["description"],
+                "icon": d["icon"],
+                "earned": now_unlocked,
+                "earnedAt": earned_at,
+                "rarity": d.get("rarity", "common"),
+                "category": d.get("category", "game"),
+                "points": d.get("points", 0),
+                "progress": None if now_unlocked else min(current_value, threshold),
+                "maxProgress": None if now_unlocked else threshold,
+            })
+
+        return result
+    except Exception:
+        logger.exception("Failed to fetch achievements")
+        raise HTTPException(status_code=500, detail="Failed to fetch achievements")
+
+
+@router.get("/user/analytics")
+async def get_analytics(
+    time_range: str = Query("30d", alias="range"),
+    user_id: str = Depends(get_current_user_id),
+):
+    """Real usage analytics from game_statistics/quiz_statistics/user_progression,
+    plus date-windowed activity counts. `range` currently only affects nothing
+    in the lifetime totals (those are always all-time); weekly/monthly buckets
+    are always computed for their respective fixed windows."""
+    db = get_database_service()
+    client = db.client
+    try:
+        game_stats, quiz_stats, progression, docs = await asyncio.gather(
+            db.get_game_statistics(user_id),
+            db.get_quiz_statistics(user_id),
+            db.get_user_progression(user_id),
+            db.get_user_documents(user_id, limit=1000),
+        )
+        game_stats = game_stats or {}
+        quiz_stats = quiz_stats or {}
+        progression = progression or {}
+
+        now = datetime.now()
+        week_ago = (now - timedelta(days=7)).isoformat()
+        month_ago = (now - timedelta(days=30)).isoformat()
+
+        async def _rows_since(table: str, ts_col: str, since_iso: str) -> List[Dict[str, Any]]:
+            try:
+                return await _to_thread(
+                    lambda: client.table(table).select(ts_col)
+                    .eq("user_id", user_id).gte(ts_col, since_iso).execute().data or []
+                )
+            except Exception:
+                return []
+
+        week_games, week_quizzes, month_games, month_quizzes = await asyncio.gather(
+            _rows_since("game_creation_log", "created_at", week_ago),
+            _rows_since("quiz_results", "completed_at", week_ago),
+            _rows_since("game_creation_log", "created_at", month_ago),
+            _rows_since("quiz_results", "completed_at", month_ago),
+        )
+
+        try:
+            recent_results = await _to_thread(
+                lambda: client.table("quiz_results")
+                .select("total_score, completed_at")
+                .eq("user_id", user_id)
+                .order("completed_at", desc=True)
+                .limit(7)
+                .execute().data or []
+            )
+        except Exception:
+            recent_results = []
+        score_trend = [
+            round(float(r.get("total_score") or 0) * 10) for r in reversed(recent_results)
+        ] or [0]
+
+        day_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        activity_by_day = []
+        for i in range(6, -1, -1):
+            day = now - timedelta(days=i)
+            day_str = day.strftime("%Y-%m-%d")
+            games_count = sum(1 for g in week_games if str(g.get("created_at") or "").startswith(day_str))
+            quizzes_count = sum(1 for q in week_quizzes if str(q.get("completed_at") or "").startswith(day_str))
+            activity_by_day.append({
+                "day": day_labels[day.weekday()],
+                "games": games_count,
+                "quizzes": quizzes_count,
+                "learning": 0,
+            })
+
+        return {
+            "totalGames": int(game_stats.get("games_created") or 0),
+            "totalQuizzes": int(quiz_stats.get("quizzes_taken") or 0),
+            "totalLearningHours": float(progression.get("total_learning_hours") or 0),
+            "averageScore": round(float(quiz_stats.get("average_score") or 0)),
+            "gamesCreated": int(game_stats.get("games_created") or 0),
+            "gamesPlayed": int(game_stats.get("games_played") or 0),
+            "gamesCompleted": int(game_stats.get("games_completed") or 0),
+            "quizzesTaken": int(quiz_stats.get("quizzes_taken") or 0),
+            "quizzesPassed": int(quiz_stats.get("quizzes_passed") or 0),
+            "documentsUploaded": len(docs),
+            "apiRequests": 0,
+            "weeklyStats": {"games": len(week_games), "quizzes": len(week_quizzes), "learningHours": 0},
+            "monthlyStats": {"games": len(month_games), "quizzes": len(month_quizzes), "learningHours": 0},
+            "scoreTrend": score_trend,
+            "activityByDay": activity_by_day,
+        }
+    except Exception:
+        logger.exception("Failed to fetch analytics")
+        raise HTTPException(status_code=500, detail="Failed to fetch analytics")

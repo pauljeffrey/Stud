@@ -5,6 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/app
 import { Button } from "@/app/components/ui/button"
 import { Badge } from "@/app/components/ui/badge"
 import { Skeleton } from "@/app/components/ui/skeleton"
+import { apiFetch } from "@/app/lib/auth"
 import {
   Brain,
   Clock,
@@ -61,11 +62,7 @@ export default function SavedQuizzesPage() {
   const loadSavedQuizzes = async () => {
     try {
       setIsLoading(true)
-      const response = await fetch("/api/quiz/saved", {
-        headers: {
-          Authorization: `Bearer ${localStorage.getItem("token")}`,
-        },
-      })
+      const response = await apiFetch("/api/quiz/saved")
 
       if (response.ok) {
         const data = await response.json()
@@ -126,11 +123,8 @@ export default function SavedQuizzesPage() {
 
   const handleRemoveSaved = async (quizId: string) => {
     try {
-      const response = await fetch(`/api/quiz/saved/${quizId}`, {
+      const response = await apiFetch(`/api/quiz/saved/${quizId}`, {
         method: "DELETE",
-        headers: {
-          Authorization: `Bearer ${localStorage.getItem("token")}`,
-        },
       })
 
       if (response.ok) {

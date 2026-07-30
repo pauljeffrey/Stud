@@ -101,7 +101,13 @@ start_server_dev() {
         --host 0.0.0.0 \
         --port 8000 \
         --reload \
-        --reload-dir /app \
+        --reload-dir /app/api \
+        --reload-dir /app/agents \
+        --reload-dir /app/models \
+        --reload-dir /app/service \
+        --reload-dir /app/configs \
+        --reload-exclude '__pycache__' \
+        --reload-exclude '*.pyc' \
         --log-level info \
         --access-log \
         --use-colors

@@ -208,6 +208,19 @@ class DatabaseService:
             return result.data or []
         return await asyncio.to_thread(_do)
 
+    async def get_checkpoint(self, user_id: str, checkpoint_id: str) -> Optional[Dict[str, Any]]:
+        def _do() -> Optional[Dict[str, Any]]:
+            result = (
+                self.client.table("game_checkpoints")
+                .select("*")
+                .eq("user_id", user_id)
+                .eq("checkpoint_id", checkpoint_id)
+                .limit(1)
+                .execute()
+            )
+            return result.data[0] if result.data else None
+        return await asyncio.to_thread(_do)
+
     async def delete_checkpoint(self, user_id: str, checkpoint_id: str) -> bool:
         def _do() -> bool:
             result = (
@@ -238,6 +251,35 @@ class DatabaseService:
             }).execute()
             return result.data[0] if result.data else {}
         return await asyncio.to_thread(_do)
+
+    async def record_game_stat(
+        self,
+        user_id: str,
+        *,
+        created: int = 0,
+        played: int = 0,
+        completed: int = 0,
+        score_pct: Optional[float] = None,
+    ) -> None:
+        """Increment game_statistics counters (read-modify-write upsert).
+        score_pct is 0-100; only recorded when a case/game actually completes."""
+        current = await self.get_game_statistics(user_id) or {}
+        games_completed = int(current.get("games_completed") or 0) + completed
+        total_score = float(current.get("total_score") or 0)
+        highest_score = float(current.get("highest_score") or 0)
+        if score_pct is not None and completed:
+            total_score += score_pct
+            highest_score = max(highest_score, score_pct)
+        average_score = round(total_score / games_completed, 2) if games_completed else 0.0
+        await self.update_game_statistics(user_id, {
+            "games_created": int(current.get("games_created") or 0) + created,
+            "games_played": int(current.get("games_played") or 0) + played,
+            "games_completed": games_completed,
+            "total_score": total_score,
+            "average_score": average_score,
+            "highest_score": highest_score,
+            "last_played_at": datetime.now().isoformat(),
+        })
 
     # ------------------------------------------------------------------
     # USER PERFORMANCE OPERATIONS
@@ -371,6 +413,38 @@ class DatabaseService:
             return result.data[0] if result.data else None
         return await asyncio.to_thread(_do)
 
+    async def record_quiz_stat(
+        self,
+        user_id: str,
+        *,
+        taken: int = 0,
+        passed: int = 0,
+        score_pct: Optional[float] = None,
+        time_spent: int = 0,
+    ) -> None:
+        """Increment quiz_statistics counters (read-modify-write upsert). score_pct is 0-100."""
+        current = await self.get_quiz_statistics(user_id) or {}
+        quizzes_taken = int(current.get("quizzes_taken") or 0) + taken
+        total_score = float(current.get("total_score") or 0)
+        highest_score = float(current.get("highest_score") or 0)
+        if score_pct is not None and taken:
+            total_score += score_pct
+            highest_score = max(highest_score, score_pct)
+        average_score = round(total_score / quizzes_taken, 2) if quizzes_taken else 0.0
+
+        def _do() -> None:
+            self.client.table("quiz_statistics").upsert({
+                "user_id": user_id,
+                "quizzes_taken": quizzes_taken,
+                "quizzes_passed": int(current.get("quizzes_passed") or 0) + passed,
+                "total_score": total_score,
+                "average_score": average_score,
+                "highest_score": highest_score,
+                "total_time_spent": int(current.get("total_time_spent") or 0) + time_spent,
+                "updated_at": datetime.now().isoformat(),
+            }).execute()
+        await asyncio.to_thread(_do)
+
     # ------------------------------------------------------------------
     # DOCUMENT OPERATIONS
     # ------------------------------------------------------------------
@@ -391,7 +465,7 @@ class DatabaseService:
     ) -> Dict[str, Any]:
         """Create a document record. Pass document_id to preserve idempotent client IDs."""
         if expires_at is None:
-            expires_at = datetime.now() + timedelta(hours=2)
+            expires_at = datetime.now() + timedelta(hours=config.PINECONE_INDEX_EXPIRATION_HOURS)
         if isinstance(expires_at, (int, float)):
             expires_at = datetime.fromtimestamp(expires_at)
         if not document_id:
@@ -453,6 +527,106 @@ class DatabaseService:
             )
             return result.data or []
         return await asyncio.to_thread(_do)
+
+    async def list_global_documents(self, limit: int = 200) -> List[Dict[str, Any]]:
+        """Curated, shared central-library documents — visible to every user."""
+        def _do() -> List[Dict[str, Any]]:
+            result = (
+                self.client.table("documents")
+                .select("*")
+                .eq("scope", "global")
+                .eq("processed", True)
+                .order("name")
+                .limit(limit)
+                .execute()
+            )
+            return result.data or []
+        return await asyncio.to_thread(_do)
+
+    # ------------------------------------------------------------------
+    # DOCUMENT SUGGESTIONS (user asks that a private doc be promoted to global)
+    # ------------------------------------------------------------------
+    async def create_document_suggestion(
+        self, document_id: str, user_id: str, note: Optional[str] = None
+    ) -> Dict[str, Any]:
+        def _do() -> Dict[str, Any]:
+            result = self.client.table("document_suggestions").insert({
+                "document_id": document_id,
+                "user_id": user_id,
+                "note": note,
+                "status": "pending",
+            }).execute()
+            return result.data[0] if result.data else {}
+        return await asyncio.to_thread(_do)
+
+    async def list_document_suggestions(self, status: str = "pending") -> List[Dict[str, Any]]:
+        """For manual review — not exposed in any user-facing UI."""
+        def _do() -> List[Dict[str, Any]]:
+            result = (
+                self.client.table("document_suggestions")
+                .select("*, documents(*)")
+                .eq("status", status)
+                .order("created_at", desc=False)
+                .execute()
+            )
+            return result.data or []
+        return await asyncio.to_thread(_do)
+
+    # ------------------------------------------------------------------
+    # NOTIFICATIONS
+    # ------------------------------------------------------------------
+    async def create_notification(
+        self,
+        user_id: str,
+        type: str,
+        title: str,
+        message: Optional[str] = None,
+        related_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        def _do() -> Dict[str, Any]:
+            result = self.client.table("notifications").insert({
+                "user_id": user_id,
+                "type": type,
+                "title": title,
+                "message": message,
+                "related_id": related_id,
+            }).execute()
+            return result.data[0] if result.data else {}
+        return await asyncio.to_thread(_do)
+
+    async def list_notifications(
+        self, user_id: str, unread_only: bool = False, limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        def _do() -> List[Dict[str, Any]]:
+            query = (
+                self.client.table("notifications")
+                .select("*")
+                .eq("user_id", user_id)
+            )
+            if unread_only:
+                query = query.eq("read", False)
+            result = query.order("created_at", desc=True).limit(limit).execute()
+            return result.data or []
+        return await asyncio.to_thread(_do)
+
+    async def mark_notification_read(self, user_id: str, notification_id: str) -> bool:
+        def _do() -> bool:
+            result = (
+                self.client.table("notifications")
+                .update({"read": True})
+                .eq("id", notification_id)
+                .eq("user_id", user_id)
+                .execute()
+            )
+            return bool(result.data)
+        return await asyncio.to_thread(_do)
+
+    async def mark_all_notifications_read(self, user_id: str) -> None:
+        def _do() -> None:
+            self.client.table("notifications").update({"read": True}).eq(
+                "user_id", user_id
+            ).eq("read", False).execute()
+        await asyncio.to_thread(_do)
 
     async def get_all_documents_admin(self, limit: int = 1000) -> List[Dict[str, Any]]:
         """Fetch all documents across all users — for background admin tasks only."""
@@ -525,6 +699,63 @@ class DatabaseService:
             return result.data or []
         return await asyncio.to_thread(_do)
 
+    async def get_document_chunks(
+        self, document_id: str, limit: int = 500
+    ) -> List[Dict[str, Any]]:
+        """Fetch all persisted chunks for a document, in original order.
+
+        Unlike vector search, this doesn't depend on the Pinecone index still
+        being alive, so it works even after the vector TTL has expired.
+        """
+        def _do() -> List[Dict[str, Any]]:
+            result = (
+                self.client.table("document_chunks")
+                .select("chunk_index, content, metadata")
+                .eq("document_id", document_id)
+                .order("chunk_index", desc=False)
+                .limit(limit)
+                .execute()
+            )
+            return result.data or []
+        return await asyncio.to_thread(_do)
+
+    # ------------------------------------------------------------------
+    # WAITLIST OPERATIONS
+    # ------------------------------------------------------------------
+    async def waitlist_email_exists(self, email: str) -> bool:
+        def _do() -> bool:
+            result = (
+                self.client.table("waitlist")
+                .select("id")
+                .eq("email", email)
+                .limit(1)
+                .execute()
+            )
+            return bool(result.data)
+        return await asyncio.to_thread(_do)
+
+    async def add_waitlist_entry(
+        self,
+        email: str,
+        name: Optional[str] = None,
+        note: Optional[str] = None,
+        source_page: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        payload = {
+            "id": str(uuid.uuid4()),
+            "email": email,
+            "name": name,
+            "note": note,
+            "source_page": source_page,
+            "created_at": datetime.now().isoformat(),
+        }
+        payload = {k: v for k, v in payload.items() if v is not None}
+
+        def _do() -> Dict[str, Any]:
+            result = self.client.table("waitlist").insert(payload).execute()
+            return (result.data or [payload])[0]
+        return await asyncio.to_thread(_do)
+
     # ------------------------------------------------------------------
     # LEARNING CHAT OPERATIONS
     # ------------------------------------------------------------------
@@ -594,6 +825,99 @@ class DatabaseService:
                 .select("*")
                 .eq("user_id", user_id)
                 .order("timestamp", desc=True)
+                .execute()
+            )
+            return result.data or []
+        return await asyncio.to_thread(_do)
+
+    async def list_achievement_definitions(self) -> List[Dict[str, Any]]:
+        def _do() -> List[Dict[str, Any]]:
+            result = self.client.table("achievement_definitions").select("*").execute()
+            return result.data or []
+        return await asyncio.to_thread(_do)
+
+    async def get_user_achievement_unlocks(self, user_id: str) -> Dict[str, Dict[str, Any]]:
+        """Return {achievement_id: user_achievements row} for this user."""
+        def _do() -> Dict[str, Dict[str, Any]]:
+            result = (
+                self.client.table("user_achievements")
+                .select("*")
+                .eq("user_id", user_id)
+                .execute()
+            )
+            return {row["achievement_id"]: row for row in (result.data or [])}
+        return await asyncio.to_thread(_do)
+
+    async def upsert_user_achievement_unlock(
+        self, user_id: str, achievement_id: str, progress: Dict[str, Any], unlocked: bool
+    ) -> Dict[str, Any]:
+        def _do() -> Dict[str, Any]:
+            payload = {
+                "user_id": user_id,
+                "achievement_id": achievement_id,
+                "progress": progress,
+                "unlocked": unlocked,
+            }
+            if unlocked:
+                payload["unlocked_at"] = datetime.now().isoformat()
+            result = (
+                self.client.table("user_achievements")
+                .upsert(payload, on_conflict="user_id,achievement_id")
+                .execute()
+            )
+            return result.data[0] if result.data else {}
+        return await asyncio.to_thread(_do)
+
+    # ------------------------------------------------------------------
+    # SAVED QUIZZES OPERATIONS
+    # ------------------------------------------------------------------
+    async def save_quiz_for_user(self, user_id: str, quiz_id: str) -> Dict[str, Any]:
+        def _do() -> Dict[str, Any]:
+            result = (
+                self.client.table("saved_quizzes")
+                .upsert({"user_id": user_id, "quiz_id": quiz_id}, on_conflict="user_id,quiz_id")
+                .execute()
+            )
+            return result.data[0] if result.data else {}
+        return await asyncio.to_thread(_do)
+
+    async def unsave_quiz_for_user(self, user_id: str, quiz_id: str) -> bool:
+        def _do() -> bool:
+            result = (
+                self.client.table("saved_quizzes")
+                .delete()
+                .eq("user_id", user_id)
+                .eq("quiz_id", quiz_id)
+                .execute()
+            )
+            return bool(result.data)
+        return await asyncio.to_thread(_do)
+
+    async def list_saved_quizzes(self, user_id: str) -> List[Dict[str, Any]]:
+        """Saved quizzes joined with their quiz row (title/type/questions/etc)."""
+        def _do() -> List[Dict[str, Any]]:
+            result = (
+                self.client.table("saved_quizzes")
+                .select("*, quizzes(*)")
+                .eq("user_id", user_id)
+                .order("saved_at", desc=True)
+                .execute()
+            )
+            return result.data or []
+        return await asyncio.to_thread(_do)
+
+    # ------------------------------------------------------------------
+    # LEADERBOARD OPERATIONS
+    # ------------------------------------------------------------------
+    async def list_leaderboard_rows(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """User progression joined with names, for ranking. Best-effort: rows
+        without a progression record (never played) are excluded."""
+        def _do() -> List[Dict[str, Any]]:
+            result = (
+                self.client.table("user_progression")
+                .select("*, users(name, avatar_url)")
+                .order("experience_points", desc=True)
+                .limit(limit)
                 .execute()
             )
             return result.data or []

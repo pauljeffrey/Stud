@@ -9,6 +9,7 @@ import { Button } from "@/app/components/ui/button"
 import { Badge } from "@/app/components/ui/badge"
 import { Skeleton } from "@/app/components/ui/skeleton"
 import { Avatar, AvatarFallback, AvatarImage } from "@/app/components/ui/avatar"
+import { apiFetch } from "@/app/lib/auth"
 import {
   User,
   Mail,
@@ -39,9 +40,9 @@ interface UserProfile {
   email: string
   profession: string
   age: number
-  avatarUrl?: string
+  avatar_url?: string
   bio: string
-  createdAt: string
+  created_at?: string
   level: number
   xp: number
 }
@@ -60,16 +61,21 @@ export default function ProfilePage() {
   const loadProfile = async () => {
     try {
       setIsLoading(true)
-      const response = await fetch("/api/auth/me", {
-        headers: {
-          Authorization: `Bearer ${localStorage.getItem("token")}`,
-        },
-      })
+      const [meResponse, statsResponse] = await Promise.all([
+        apiFetch("/api/auth/me"),
+        apiFetch("/api/user/stats"),
+      ])
 
-      if (response.ok) {
-        const data = await response.json()
-        setProfile(data.user)
-        setEditedProfile(data.user)
+      if (meResponse.ok) {
+        const data = await meResponse.json()
+        const stats = statsResponse.ok ? await statsResponse.json().catch(() => null) : null
+        const merged: UserProfile = {
+          ...data.user,
+          level: stats?.stats?.currentLevel ?? 1,
+          xp: stats?.stats?.totalXP ?? 0,
+        }
+        setProfile(merged)
+        setEditedProfile(merged)
       } else {
         // Mock data
         setProfile({
@@ -79,7 +85,7 @@ export default function ProfilePage() {
           profession: "Cardiologist",
           age: 35,
           bio: "Passionate about medical education and patient care.",
-          createdAt: "2024-01-01",
+          created_at: "2024-01-01",
           level: 5,
           xp: 2450,
         })
@@ -101,11 +107,10 @@ export default function ProfilePage() {
 
   const handleSave = async () => {
     try {
-      const response = await fetch("/api/user/profile", {
+      const response = await apiFetch("/api/user/profile", {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${localStorage.getItem("token")}`,
         },
         body: JSON.stringify(editedProfile),
       })
@@ -182,7 +187,7 @@ export default function ProfilePage() {
             <div className="flex flex-col md:flex-row items-start md:items-center gap-6">
               <div className="relative group">
                 <Avatar className="h-32 w-32 border-4 border-purple-500">
-                  <AvatarImage src={profile.avatarUrl} />
+                  <AvatarImage src={profile.avatar_url} />
                   <AvatarFallback className="bg-purple-600 text-2xl">
                     {profile.name.charAt(0)}
                   </AvatarFallback>
@@ -230,9 +235,9 @@ export default function ProfilePage() {
                   </div>
                   <div className="text-right">
                     <Badge className="bg-gradient-to-r from-purple-600 to-pink-600 text-white text-lg px-4 py-2 mb-2">
-                      Level {profile.level}
+                      Level {profile.level ?? 1}
                     </Badge>
-                    <p className="text-sm text-purple-200">{profile.xp.toLocaleString()} XP</p>
+                    <p className="text-sm text-purple-200">{(profile.xp ?? 0).toLocaleString()} XP</p>
                   </div>
                 </div>
                 {isEditing ? (
@@ -296,7 +301,7 @@ export default function ProfilePage() {
                 <Label className="text-purple-200">Member Since</Label>
                 <div className="flex items-center gap-2 mt-1">
                   <Calendar className="h-4 w-4 text-purple-300" />
-                  <p>{new Date(profile.createdAt).toLocaleDateString()}</p>
+                  <p>{profile.created_at ? new Date(profile.created_at).toLocaleDateString() : "—"}</p>
                 </div>
               </div>
             </CardContent>

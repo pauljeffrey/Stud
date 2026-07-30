@@ -1,6 +1,6 @@
 """
 Authentication API endpoints
-Handles user registration, login, session management, and password reset.
+Handles user registration, login (JWT bearer tokens), and password reset.
 
 All Supabase queries are dispatched via ``asyncio.to_thread`` so the event loop
 stays free for other requests; this is the hottest path under high concurrency.
@@ -18,7 +18,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr, field_validator
 
 from api.auth_deps import (
-    JWT_EXPIRATION_HOURS,
     create_jwt_token,
     get_current_user,
     hash_password,
@@ -96,28 +95,8 @@ def _public_user(user: Dict[str, Any]) -> Dict[str, Any]:
         "age": user.get("age"),
         "avatar_url": user.get("avatar_url"),
         "bio": user.get("bio"),
+        "created_at": user.get("created_at"),
     }
-
-
-async def _create_session(client, user_id: str) -> Optional[str]:
-    """Persist a session row and return the opaque token.
-    Best-effort — returns None if the table is missing or the insert fails."""
-    try:
-        token = secrets.token_urlsafe(32)
-        expires_at = (datetime.now() + timedelta(hours=JWT_EXPIRATION_HOURS)).isoformat()
-        payload = {
-            "user_id": user_id,
-            "session_token": token,
-            "expires_at": expires_at,
-            "created_at": _now(),
-        }
-        await asyncio.to_thread(
-            lambda: client.table("user_sessions").insert(payload).execute()
-        )
-        return token
-    except Exception as exc:
-        logger.warning("Session row creation skipped for %s: %s", user_id, exc)
-        return None
 
 
 # ============================================================
@@ -178,7 +157,6 @@ async def register(http_request: Request, request: RegisterRequest):
         )
 
         token = create_jwt_token(user_id, request.email)
-        session_token = await _create_session(client, user_id)
 
         return {
             "success": True,
@@ -191,7 +169,6 @@ async def register(http_request: Request, request: RegisterRequest):
                 "profession": profession_value,
             },
             "token": token,
-            "session_token": session_token,
         }
 
     except HTTPException:
@@ -230,14 +207,12 @@ async def login(http_request: Request, request: LoginRequest):
         await invalidate_user_cache(user_id)
 
         token = create_jwt_token(user_id, request.email)
-        session_token = await _create_session(client, user_id)
 
         return {
             "success": True,
             "message": "Login successful",
             "user": _public_user(user),
             "token": token,
-            "session_token": session_token,
         }
 
     except HTTPException:
@@ -249,15 +224,7 @@ async def login(http_request: Request, request: LoginRequest):
 
 @router.post("/auth/logout")
 async def logout(current_user: dict = Depends(get_current_user)):
-    db = get_database_service()
-    user_id = current_user["id"]
-    try:
-        await asyncio.to_thread(
-            lambda: db.client.table("user_sessions").delete().eq("user_id", user_id).execute()
-        )
-    except Exception as exc:
-        logger.warning("Could not delete user_sessions for %s: %s", user_id, exc)
-    await invalidate_user_cache(user_id)
+    await invalidate_user_cache(current_user["id"])
     return {"success": True, "message": "Logged out successfully"}
 
 
@@ -348,12 +315,6 @@ async def confirm_password_reset(request: PasswordResetConfirm):
             .eq("id", user["id"])
             .execute()
         )
-        try:
-            await asyncio.to_thread(
-                lambda: client.table("user_sessions").delete().eq("user_id", user["id"]).execute()
-            )
-        except Exception as exc:
-            logger.warning("Could not clear sessions after password reset for %s: %s", user["id"], exc)
         await invalidate_user_cache(user["id"])
 
         return {"success": True, "message": "Password reset successfully"}

@@ -71,7 +71,7 @@ class DocumentProcessor:
         self.file_parser_agent = get_file_parser_agent()
         
         # Default expiration time (2 hours for temporary storage)
-        self.default_expiration_hours = int(os.getenv("PINECONE_INDEX_EXPIRATION_HOURS", "2"))
+        self.default_expiration_hours = config.PINECONE_INDEX_EXPIRATION_HOURS
         self.embedding_dimension = 1536  # OpenAI text-embedding-3-small dimension
 
     @staticmethod
@@ -588,7 +588,18 @@ class DocumentProcessor:
     async def get_chunks_for_document(
         self, document_id: str, top_k: int = 100
     ) -> List[Dict[str, Any]]:
-        """Get all chunks for a document (uses broad query for vector retrieval)."""
+        """Get all chunks for a document, in original document order.
+
+        Reads directly from the persisted document_chunks rows rather than a
+        vector-similarity search against a generic placeholder query — that
+        guarantees full, deterministic coverage of the document (instead of
+        whatever happens to rank highest against a meaningless query) and
+        keeps working even after the document's Pinecone index has expired.
+        """
+        chunks = await self.db_service.get_document_chunks(document_id, limit=top_k)
+        if chunks:
+            return chunks
+        # Fall back to vector search (e.g. chunk rows missing for an older document)
         return await self.search_documents(
             query="medical clinical health document content",
             document_id=document_id,

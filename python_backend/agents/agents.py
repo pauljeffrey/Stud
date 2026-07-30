@@ -14,7 +14,7 @@ from model import select_model, select_model_with_fallback
 from configs.config import config
 from service.model_credentials import validate_user_credentials
 
-_DEFAULT_MODEL = "nvidia/nemotron-3-nano-30b-a3b:free"
+_DEFAULT_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
 
 
 def _env_model(config_attr: str) -> str:

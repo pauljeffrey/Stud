@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server"
 import { PYTHON_BACKEND_URL } from "@/app/lib/proxy"
 
+export const maxDuration = 300
+
 export async function POST(req: Request) {
   try {
     const body = await req.json().catch(() => ({}))

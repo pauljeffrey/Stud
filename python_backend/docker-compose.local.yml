@@ -5,6 +5,12 @@ services:
     ports:
       - "6379:6379"
     restart: unless-stopped
+    # Cap Redis so it cannot compete with the host for every core.
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -26,6 +32,18 @@ services:
       - PYTHONUNBUFFERED=1
       # Override .env so start.sh picks start_server_dev() → uvicorn --reload
       - GUNICORN_WORKERS=
+      # Local dev: keep thread/connection pools small (production uses 512 in .env).
+      - DB_THREAD_POOL_SIZE=8
+      - REDIS_MAX_CONNECTIONS=8
+    # Limit backend CPU — raise cpus (e.g. "4.0") before a heavy load test.
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.25"
+          memory: 512M
     volumes:
       # Live-mount source code — uvicorn --reload watches /app for changes
       - .:/app

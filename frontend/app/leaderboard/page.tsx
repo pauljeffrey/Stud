@@ -7,6 +7,7 @@ import { Skeleton } from "@/app/components/ui/skeleton"
 import { Button } from "@/app/components/ui/button"
 import { Trophy, Crown, Medal, Award, Users, TrendingUp, Target } from "lucide-react"
 import Link from "next/link"
+import { apiFetch } from "@/app/lib/auth"
 import {
   Select,
   SelectContent,
@@ -43,11 +44,7 @@ export default function LeaderboardPage() {
   const loadLeaderboard = async () => {
     try {
       setIsLoading(true)
-      const response = await fetch(`/api/leaderboard?category=${category}&period=${period}`, {
-        headers: {
-          Authorization: `Bearer ${localStorage.getItem("token")}`,
-        },
-      })
+      const response = await apiFetch(`/api/leaderboard?category=${category}&period=${period}`)
 
       if (response.ok) {
         const data = await response.json()

@@ -5,6 +5,7 @@ Creates comprehensive world models based on user configuration or random initial
 from typing import Optional
 from pydantic_ai import Agent
 from agents.agents import get_game_world_model_model
+from agents._shared import merge_credentials
 from models.states import GameWorldModel, GameConfig
 import os
 import json
@@ -53,10 +54,9 @@ class GameWorldAgent:
         )
     
     def _reinitialize_model(self, model_name: Optional[str] = None, api_key: Optional[str] = None):
-        if model_name is not None:
-            self._model_name = model_name
-        if api_key is not None:
-            self._api_key = api_key
+        self._model_name, self._api_key = merge_credentials(
+            self._model_name, self._api_key, model_name, api_key
+        )
         model = get_game_world_model_model(self._model_name, self._api_key)
         self.agent = Agent(
             model,

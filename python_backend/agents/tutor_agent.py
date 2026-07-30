@@ -21,6 +21,7 @@ from pydantic_ai.messages import (
 
 from configs.config import config
 from model import select_model
+from agents._shared import merge_credentials
 from models.states import TutorResponse
 from models.tutor_models import UserEnrollment
 from service.document_processor import get_document_processor
@@ -83,10 +84,9 @@ class TutorAgent:
         api_key: Optional[str] = None,
     ) -> None:
         """Rebuild the underlying model and re-register tools (e.g. after config change)."""
-        if model_name is not None:
-            self._model_name = model_name
-        if api_key is not None:
-            self._api_key = api_key
+        self._model_name, self._api_key = merge_credentials(
+            self._model_name, self._api_key, model_name, api_key
+        )
         model, _ = select_model(
             self._model_name or getattr(config, "TUTOR_MODEL_NAME", None) or "gemini-2.0-flash-exp",
             self._api_key or config.GOOGLE_API_KEY or "",

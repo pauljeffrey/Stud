@@ -21,9 +21,12 @@ from starlette.requests import Request
 from api.auth import router as auth_router
 from api.cleanup import router as cleanup_router
 from api.game_v2 import router as game_v2_router
+from api.leaderboard import router as leaderboard_router
 from api.learning import router as learning_router
+from api.notifications import router as notifications_router
 from api.quiz import router as quiz_router
 from api.user import router as user_router
+from api.waitlist import router as waitlist_router
 from configs.config import config
 from service.database import get_database_service
 
@@ -136,8 +139,8 @@ def _configure_thread_pool() -> None:
     """
     from concurrent.futures import ThreadPoolExecutor
 
-    # Prod default 512; override per worker if Supabase latency or pool limits demand it.
-    workers = int(os.getenv("DB_THREAD_POOL_SIZE", "512") or 512)
+    # Dev default is modest; production can raise (e.g. 512) per Gunicorn worker.
+    workers = int(os.getenv("DB_THREAD_POOL_SIZE", "32") or 32)
     loop = asyncio.get_running_loop()
     loop.set_default_executor(ThreadPoolExecutor(max_workers=workers))
     logger.info("Default thread executor sized for %s workers", workers)
@@ -194,6 +197,9 @@ for router, tag in (
     (learning_router, "Learning"),
     (game_v2_router, "Game"),
     (cleanup_router, "Cleanup"),
+    (waitlist_router, "Waitlist"),
+    (leaderboard_router, "Leaderboard"),
+    (notifications_router, "Notifications"),
 ):
     app.include_router(router, prefix="/api", tags=[tag])
 

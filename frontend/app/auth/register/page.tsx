@@ -202,9 +202,6 @@ export default function RegisterPage() {
       if (data.token && data.user) {
         saveAuth(data.token, data.user)
       }
-      if (data.session_token) {
-        localStorage.setItem("session_token", data.session_token)
-      }
 
       toast({
         title: "Registration successful",

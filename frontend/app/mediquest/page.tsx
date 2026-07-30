@@ -41,10 +41,12 @@ import {
   toBackendPayload,
 } from "@/app/lib/game-state"
 import {
-  getSessionCredentials,
-  hasUsableCredentials,
-  toBackendModelFields,
+  fetchAccountCredentials,
+  resolveCredentials,
+  resolveModelFields,
+  toModelConfig,
 } from "@/app/lib/api-credentials"
+import { apiFetch, getToken } from "@/app/lib/auth"
 
 export default function MediquestPage() {
   return (
@@ -68,11 +70,13 @@ function MediquestPageContent() {
 
   const [gameState, setGameState] = useState<GameState | null>(null)
   const [loading, setLoading] = useState(true)
+  const [questComplete, setQuestComplete] = useState(false)
   const [timeRemaining, setTimeRemaining] = useState(0)
   const [userAnswer, setUserAnswer] = useState("")
   const [selectedOption, setSelectedOption] = useState("")
   const [showAnswer, setShowAnswer] = useState(false)
   const [showClue, setShowClue] = useState(false)
+  const [revealedClue, setRevealedClue] = useState<string | null>(null)
   const [showReason, setShowReason] = useState(false)
   const [selectedNpc, setSelectedNpc] = useState<string | null>(null)
   const [gameMasterMessage, setGameMasterMessage] = useState("")
@@ -97,41 +101,16 @@ function MediquestPageContent() {
   })
 
   useEffect(() => {
-    const loadApiConfig = () => {
-      const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
-      if (token) {
-        fetch("/api/user/settings", { headers: { Authorization: `Bearer ${token}` } })
-          .then((r) => r.json())
-          .then((data) => {
-            const s = data.settings || {}
-            if (hasUsableCredentials(s)) {
-              setModelConfig({
-                provider: s.provider || "google",
-                model_name: s.modelName || "",
-                api_key: s.apiKey || "",
-              })
-            }
-          })
-          .catch(() => {})
-      } else {
-        try {
-          const stored = localStorage.getItem("apiSettings") || localStorage.getItem("api_settings")
-          if (stored) {
-            const s = JSON.parse(stored)
-            if (hasUsableCredentials(s)) {
-              setModelConfig({
-                provider: s.provider || "google",
-                model_name: s.modelName || "",
-                api_key: s.apiKey || "",
-              })
-            }
-          }
-        } catch {
-          // ignore
-        }
-      }
+    const apply = (creds: ReturnType<typeof resolveCredentials>) => {
+      if (creds) setModelConfig(toModelConfig(creds))
     }
-    loadApiConfig()
+
+    apply(resolveCredentials())
+
+    const token = getToken()
+    if (token) {
+      fetchAccountCredentials(token).then(apply).catch(() => {})
+    }
   }, [])
 
   const gameMasterChatEndRef = useRef<HTMLDivElement>(null)
@@ -207,20 +186,7 @@ function MediquestPageContent() {
   const gamePayload = () =>
     gameState ? toBackendPayload(backendStateRef.current, gameState) : null
 
-  const apiModelFields = () => {
-    const session = getSessionCredentials()
-    const fields: Record<string, string> = {
-      provider: session?.provider || modelConfig.provider,
-    }
-    const modelName = session?.modelName || modelConfig.model_name
-    const apiKey = session?.apiKey || modelConfig.api_key
-    if (modelName && apiKey && hasUsableCredentials({ provider: fields.provider, modelName, apiKey })) {
-      return toBackendModelFields({ provider: fields.provider, modelName, apiKey })
-    }
-    if (modelConfig.model_name) fields.model_name = modelConfig.model_name
-    if (modelConfig.api_key) fields.api_key = modelConfig.api_key
-    return fields
-  }
+  const apiModelFields = () => resolveModelFields(modelConfig)
 
   useEffect(() => {
     if (!caseKey) return
@@ -229,6 +195,7 @@ function MediquestPageContent() {
     setScenarioOpen(false)
     setShowAnswer(false)
     setShowClue(false)
+    setRevealedClue(null)
     setShowReason(false)
     setSelectedOption("")
     setUserAnswer("")
@@ -255,7 +222,7 @@ function MediquestPageContent() {
         }
       }
 
-      const response = await fetch(`/api/game/${gameId}`)
+      const response = await apiFetch(`/api/game/${gameId}`)
       if (!response.ok) throw new Error("Failed to load game")
       const data = await response.json()
       backendStateRef.current = (data.game_state ?? {}) as Record<string, unknown>
@@ -273,12 +240,18 @@ function MediquestPageContent() {
   }
 
   const handleUseClue = async () => {
-    if (!gameState) return
+    if (!gameState || questComplete) return
     const payload = gamePayload()
     if (!payload) return
 
+    // Capture the clue that already exists for THIS case before we trigger
+    // escalation — the escalation call regenerates the case state (and isn't
+    // instructed to preserve the clue text), so reading it from the
+    // post-escalation response would show the wrong thing.
+    const clueToReveal = gameState.case_state.clue
+
     try {
-      const response = await fetch("/api/game/use-clue", {
+      const response = await apiFetch("/api/game/use-clue", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -291,6 +264,7 @@ function MediquestPageContent() {
 
       const data = await response.json()
       setGameState((prev) => syncFromResponse(data.game_state, prev))
+      setRevealedClue(clueToReveal || "No clue available for this case.")
       setShowClue(true)
 
       toast({
@@ -308,7 +282,7 @@ function MediquestPageContent() {
   }
 
   const handleSubmitAnswer = async () => {
-    if (!gameState) return
+    if (!gameState || questComplete) return
     const payload = gamePayload()
     if (!payload) return
 
@@ -324,7 +298,7 @@ function MediquestPageContent() {
 
     try {
       const timeTaken = gameState.case_state.time_limit_seconds - timeRemaining
-      const response = await fetch("/api/game/submit-answer", {
+      const response = await apiFetch("/api/game/submit-answer", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -346,6 +320,19 @@ function MediquestPageContent() {
         title: `Score: ${data.performance.score}/10`,
         description: data.performance.analysis,
       })
+
+      if (data.quest_complete) {
+        setQuestComplete(true)
+        toast({
+          title: "Quest Complete! 🎉",
+          description: "You've finished every case in this adventure. Great work!",
+        })
+      } else if (data.handoff_occurred) {
+        toast({
+          title: "Case Complete",
+          description: "Moving on to the next case…",
+        })
+      }
     } catch (error) {
       toast({
         title: "Error",
@@ -376,7 +363,7 @@ function MediquestPageContent() {
     )
 
     try {
-      const response = await fetch("/api/game/master-chat", {
+      const response = await apiFetch("/api/game/master-chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -439,7 +426,7 @@ function MediquestPageContent() {
       const npc = gameState.npc_states.find(n => n.npc_id === selectedNpc)
       if (!npc) return
 
-      const response = await fetch("/api/game/npc-chat", {
+      const response = await apiFetch("/api/game/npc-chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -645,54 +632,72 @@ function MediquestPageContent() {
 
             <Card className={`${panelClass} shrink-0`}>
               <CardHeader className="py-2 px-3">
-                <CardTitle className="text-sm">Question</CardTitle>
+                <CardTitle className="text-sm">{questComplete ? "Quest Complete" : "Question"}</CardTitle>
               </CardHeader>
               <CardContent className="px-3 pb-3 space-y-2">
-                <p className="text-sm font-medium">{gameState.case_state.question}</p>
-                {gameState.case_state.options ? (
-                  <div className="grid gap-1">
-                    {gameState.case_state.options.map((option, idx) => (
-                      <Button
-                        key={idx}
-                        size="sm"
-                        variant={selectedOption === option ? "default" : "outline"}
-                        className="h-8 justify-start text-left text-xs bg-black/50 border-purple-700/40"
-                        onClick={() => setSelectedOption(option)}
-                      >
-                        {String.fromCharCode(65 + idx)}. {option}
-                      </Button>
-                    ))}
+                {questComplete ? (
+                  <div className="text-center py-4 space-y-3">
+                    <CheckCircle2 className="h-10 w-10 mx-auto text-green-400" />
+                    <p className="text-sm text-gray-200">
+                      You've completed every case in this adventure. Great work!
+                    </p>
+                    <Button
+                      size="sm"
+                      onClick={() => router.push("/dashboard")}
+                      className="bg-purple-700 hover:bg-purple-800"
+                    >
+                      Back to Dashboard
+                    </Button>
                   </div>
                 ) : (
-                  <Textarea
-                    placeholder="Your answer…"
-                    value={userAnswer}
-                    onChange={(e) => setUserAnswer(e.target.value)}
-                    className="bg-black/50 border-purple-700/40 min-h-[72px] text-sm"
-                  />
+                  <>
+                    <p className="text-sm font-medium">{gameState.case_state.question}</p>
+                    {gameState.case_state.options ? (
+                      <div className="grid gap-1">
+                        {gameState.case_state.options.map((option, idx) => (
+                          <Button
+                            key={idx}
+                            size="sm"
+                            variant={selectedOption === option ? "default" : "outline"}
+                            className="h-8 justify-start text-left text-xs bg-black/50 border-purple-700/40"
+                            onClick={() => setSelectedOption(option)}
+                          >
+                            {String.fromCharCode(65 + idx)}. {option}
+                          </Button>
+                        ))}
+                      </div>
+                    ) : (
+                      <Textarea
+                        placeholder="Your answer…"
+                        value={userAnswer}
+                        onChange={(e) => setUserAnswer(e.target.value)}
+                        className="bg-black/50 border-purple-700/40 min-h-[72px] text-sm"
+                      />
+                    )}
+                    <div className="flex gap-2">
+                      <Button
+                        size="sm"
+                        onClick={handleUseClue}
+                        disabled={showClue || gameState.case_state.clue_used}
+                        variant="outline"
+                        className="flex-1 h-8 text-xs border-purple-700/40"
+                      >
+                        <Lightbulb className="h-3 w-3 mr-1" />
+                        {gameState.case_state.clue_used ? "Clue Used" : "Use Clue"}
+                      </Button>
+                      <Button
+                        size="sm"
+                        onClick={handleSubmitAnswer}
+                        className="flex-1 h-8 text-xs bg-purple-700 hover:bg-purple-800"
+                      >
+                        Submit
+                      </Button>
+                    </div>
+                  </>
                 )}
-                <div className="flex gap-2">
-                  <Button
-                    size="sm"
-                    onClick={handleUseClue}
-                    disabled={showClue || gameState.case_state.clue_used}
-                    variant="outline"
-                    className="flex-1 h-8 text-xs border-purple-700/40"
-                  >
-                    <Lightbulb className="h-3 w-3 mr-1" />
-                    {gameState.case_state.clue_used ? "Clue Used" : "Use Clue"}
-                  </Button>
-                  <Button
-                    size="sm"
-                    onClick={handleSubmitAnswer}
-                    className="flex-1 h-8 text-xs bg-purple-700 hover:bg-purple-800"
-                  >
-                    Submit
-                  </Button>
-                </div>
-                {showClue && gameState.case_state.clue && (
+                {showClue && revealedClue && (
                   <p className="text-xs text-purple-200 border border-purple-600/40 rounded p-2">
-                    <strong>Clue:</strong> {gameState.case_state.clue}
+                    <strong>Clue:</strong> {revealedClue}
                   </p>
                 )}
                 {showAnswer && gameState.case_state.answer && (

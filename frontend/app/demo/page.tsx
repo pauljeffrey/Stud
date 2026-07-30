@@ -12,14 +12,20 @@ import { ArrowRight, Sparkles, AlertCircle } from "lucide-react"
 import { motion, AnimatePresence } from "framer-motion"
 import { useToast } from "@/app/components/ui/use-toast"
 import { ApiKeySetupDialog } from "@/app/components/api-key-setup-dialog"
+import { FreeModelNotice } from "@/app/components/free-model-notice"
 import {
   type ApiCredentials,
+  fetchAccountCredentials,
+  getAccountCredentials,
   hasUsableCredentials,
   parseApiErrorDetail,
+  saveAccountCredentials,
+  resolveCredentials,
   setSessionCredentials,
   toBackendModelFields,
   validateCredentials,
 } from "@/app/lib/api-credentials"
+import { apiFetch, getToken } from "@/app/lib/auth"
 
 interface GameSettingsField {
   label: string
@@ -124,6 +130,30 @@ function InitProgressOverlay({ progress }: { progress: number }) {
   )
 }
 
+function InitErrorPanel({
+  message,
+  onDismiss,
+}: {
+  message: string
+  onDismiss: () => void
+}) {
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      className="flex flex-col items-center gap-4 py-8"
+    >
+      <AlertCircle className="h-12 w-12 text-red-400" />
+      <p className="text-lg font-semibold text-red-200 text-center">Game setup failed</p>
+      <p className="text-sm text-gray-300 text-center max-w-md">{message}</p>
+      <Button type="button" variant="outline" onClick={onDismiss} className="border-purple-700/40">
+        Try again
+      </Button>
+    </motion.div>
+  )
+}
+
 const DEMO_SESSION_KEY = "stud_demo_session_id"
 
 function getDemoSessionId(): string {
@@ -140,6 +170,7 @@ export default function DemoPage() {
   const router = useRouter()
   const { toast } = useToast()
   const [loading, setLoading] = useState(false)
+  const [initError, setInitError] = useState<string | null>(null)
   const [progress, setProgress] = useState(0)
   const progressRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -189,10 +220,17 @@ export default function DemoPage() {
   }, [loading])
 
   useEffect(() => {
-    const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
+    const token = getToken()
     setIsLoggedIn(!!token)
+
+    const cached = resolveCredentials()
+    if (cached) {
+      setHasApiSettings(true)
+      setSavedApiSettings(cached)
+    }
+
     if (token) {
-      fetch("/api/user/stats", { headers: { Authorization: `Bearer ${token}` } })
+      apiFetch("/api/user/stats")
         .then((r) => r.json())
         .then((data) => {
           if (data.success && data.user?.profession) {
@@ -200,35 +238,18 @@ export default function DemoPage() {
           }
         })
         .catch(() => {})
-      fetch("/api/user/settings", { headers: { Authorization: `Bearer ${token}` } })
-        .then((r) => r.json())
-        .then((data) => {
-          const s = data.settings || {}
-          if (hasUsableCredentials(s)) {
+
+      fetchAccountCredentials(token)
+        .then((creds) => {
+          if (creds) {
             setHasApiSettings(true)
-            setSavedApiSettings(s)
-          } else if (s.provider || s.modelName || s.apiKey) {
+            setSavedApiSettings(creds)
+          } else if (!getAccountCredentials()) {
             setHasApiSettings(false)
             setSavedApiSettings(null)
           }
         })
         .catch(() => {})
-    } else {
-      try {
-        const stored =
-          typeof window !== "undefined"
-            ? localStorage.getItem("apiSettings") || localStorage.getItem("api_settings")
-            : null
-        if (stored) {
-          const parsed = JSON.parse(stored)
-          if (hasUsableCredentials(parsed)) {
-            setHasApiSettings(true)
-            setSavedApiSettings(parsed)
-          }
-        }
-      } catch {
-        setHasApiSettings(false)
-      }
     }
   }, [])
 
@@ -241,32 +262,25 @@ export default function DemoPage() {
       .catch(() => {})
   }, [])
 
-  const buildApiCredentials = (): Partial<ApiCredentials> | null => {
-    if (hasApiSettings && savedApiSettings) {
-      return {
-        provider: savedApiSettings.provider || "google",
-        modelName: savedApiSettings.modelName || "",
-        apiKey: savedApiSettings.apiKey || "",
-      }
-    }
-    if (formData.model_name || formData.api_key) {
-      return {
-        provider: formData.provider || "google",
-        modelName: formData.model_name || "",
-        apiKey: formData.api_key || "",
-      }
-    }
-    return null
+  const buildApiCredentials = (): ApiCredentials | null => {
+    return resolveCredentials() || (savedApiSettings as ApiCredentials | null)
+  }
+
+  const reportInitFailure = (error: unknown) => {
+    const message =
+      error instanceof Error ? error.message : "Failed to start game. Please try again."
+    setInitError(message)
+    toast({
+      title: "Error",
+      description: message,
+      variant: "destructive",
+    })
   }
 
   const startGame = async (body: Record<string, unknown>) => {
-    const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
-    const headers: Record<string, string> = { "Content-Type": "application/json" }
-    if (token) headers["Authorization"] = `Bearer ${token}`
-
-    const response = await fetch("/api/game/initialize", {
+    const response = await apiFetch("/api/game/initialize", {
       method: "POST",
-      headers,
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     })
 
@@ -281,14 +295,6 @@ export default function DemoPage() {
 
     const data = await response.json()
 
-    if (data.used_platform_default && !isLoggedIn) {
-      toast({
-        title: "Using Stud default model",
-        description:
-          "Your API settings were invalid or empty, so we used the platform model for this demo.",
-      })
-    }
-
     setProgress(100)
 
     if (typeof window !== "undefined" && data.game_state?.game_id) {
@@ -300,32 +306,28 @@ export default function DemoPage() {
 
   const handleApiDialogComplete = async (creds: ApiCredentials, saveToAccount: boolean) => {
     if (saveToAccount && isLoggedIn) {
-      const token = localStorage.getItem("token")
-      const res = await fetch("/api/user/settings", {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify(creds),
-      })
-      if (!res.ok) throw new Error("Failed to save API settings")
-      setSavedApiSettings(creds)
+      const token = getToken()
+      if (!token) throw new Error("Please log in again")
+      const saved = await saveAccountCredentials(creds, token)
+      setSavedApiSettings(saved)
       setHasApiSettings(true)
     } else {
       setSessionCredentials(creds)
+      if (isLoggedIn) {
+        setSavedApiSettings(creds)
+        setHasApiSettings(true)
+      }
     }
 
+    setShowApiDialog(false)
+
     const base = pendingGameBody || {}
+    setInitError(null)
     setLoading(true)
     try {
       await startGame({ ...base, ...toBackendModelFields(creds) })
     } catch (error: unknown) {
-      toast({
-        title: "Error",
-        description: error instanceof Error ? error.message : "Failed to start game",
-        variant: "destructive",
-      })
+      reportInitFailure(error)
     } finally {
       setLoading(false)
       setPendingGameBody(null)
@@ -334,10 +336,10 @@ export default function DemoPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    setInitError(null)
     setLoading(true)
 
     try {
-      const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
       const userStr = typeof window !== "undefined" ? localStorage.getItem("user") : null
       const user = userStr ? JSON.parse(userStr) : null
 
@@ -393,12 +395,7 @@ export default function DemoPage() {
 
       await startGame(body)
     } catch (error: unknown) {
-      toast({
-        title: "Error",
-        description:
-          error instanceof Error ? error.message : "Failed to start game. Please try again.",
-        variant: "destructive",
-      })
+      reportInitFailure(error)
     } finally {
       setLoading(false)
     }
@@ -463,12 +460,20 @@ export default function DemoPage() {
             </p>
           </div>
 
+          <FreeModelNotice className="relative z-10 mb-4" />
+
           <Card className="bg-black/60 backdrop-blur-md border-purple-700/40 relative z-10">
             <CardHeader>
               <CardTitle className="text-2xl">
-                {loading ? "Building Your World" : isLoggedIn ? "Game Configuration" : "Demo Configuration"}
+                {loading
+                  ? "Building Your World"
+                  : initError
+                    ? "Setup Failed"
+                    : isLoggedIn
+                      ? "Game Configuration"
+                      : "Demo Configuration"}
               </CardTitle>
-              {!loading && (
+              {!loading && !initError && (
                 <CardDescription className="text-gray-400">
                   {isLoggedIn
                     ? "Select values for each setting or use random. All fields are optional."
@@ -480,6 +485,8 @@ export default function DemoPage() {
               <AnimatePresence mode="wait">
                 {loading ? (
                   <InitProgressOverlay key="progress" progress={progress} />
+                ) : initError ? (
+                  <InitErrorPanel key="error" message={initError} onDismiss={() => setInitError(null)} />
                 ) : (
                   <motion.form
                     key="form"

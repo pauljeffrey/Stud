@@ -69,9 +69,15 @@ export function ApiKeySetupDialog({
 
   const finish = async (saveToAccount: boolean) => {
     setBusy(true)
+    setValidationError(null)
     try {
       await onComplete(creds, saveToAccount)
       onOpenChange(false)
+      setStep("form")
+    } catch (error: unknown) {
+      setValidationError(
+        error instanceof Error ? error.message : "Something went wrong. Please try again."
+      )
       setStep("form")
     } finally {
       setBusy(false)

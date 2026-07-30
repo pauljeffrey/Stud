@@ -1,7 +1,7 @@
 "use client"
 
-import { useState, useEffect } from "react"
-import { useRouter } from "next/navigation"
+import { useState, useEffect, useRef, Suspense } from "react"
+import { useRouter, useSearchParams } from "next/navigation"
 import { Button } from "@/app/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/app/components/ui/card"
 import { Input } from "@/app/components/ui/input"
@@ -21,9 +21,19 @@ import {
   Brain,
   FileText,
   Upload,
+  Bookmark,
 } from "lucide-react"
 import { useToast } from "@/app/components/ui/use-toast"
+import { FreeModelNotice } from "@/app/components/free-model-notice"
 import { motion, AnimatePresence } from "framer-motion"
+import {
+  fetchAccountCredentials,
+  resolveCredentials,
+  resolveModelFields,
+  toModelConfig,
+} from "@/app/lib/api-credentials"
+import { apiFetch, getToken, getUser } from "@/app/lib/auth"
+import { readApiError } from "@/app/lib/game-state"
 
 interface QuizQuestion {
   question_id: string
@@ -44,9 +54,26 @@ interface Quiz {
 }
 
 export default function QuizPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-screen bg-gradient-to-b from-black via-[#1E3A8A] to-[#8B5CF6] flex items-center justify-center text-gray-300">
+          Loading…
+        </div>
+      }
+    >
+      <QuizPageContent />
+    </Suspense>
+  )
+}
+
+function QuizPageContent() {
   const router = useRouter()
+  const searchParams = useSearchParams()
   const { toast } = useToast()
   const [quiz, setQuiz] = useState<Quiz | null>(null)
+  const [isSaved, setIsSaved] = useState(false)
+  const [isSaving, setIsSaving] = useState(false)
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0)
   const [answers, setAnswers] = useState<Record<string, string>>({})
   const [timeRemaining, setTimeRemaining] = useState(0)
@@ -54,6 +81,7 @@ export default function QuizPage() {
   const [isGenerating, setIsGenerating] = useState(false)
   const [showResults, setShowResults] = useState(false)
   const [scores, setScores] = useState<Record<string, number>>({})
+  const quizStartRef = useRef<number | null>(null)
   const [modelConfig, setModelConfig] = useState({
     model_name: "",
     api_key: "",
@@ -68,18 +96,36 @@ export default function QuizPage() {
     source: "ai_knowledge" as "ai_knowledge" | "document",
     document_id: ""
   })
-  const [documents, setDocuments] = useState<{ id: string; file_name: string; processed?: boolean }[]>([])
+  const [documents, setDocuments] = useState<
+    { id: string; file_name: string; processed?: boolean; processing_status?: string }[]
+  >([])
+  const [libraryDocuments, setLibraryDocuments] = useState<{ id: string; file_name: string }[]>([])
   const [documentsLoading, setDocumentsLoading] = useState(false)
   const [uploadingDoc, setUploadingDoc] = useState(false)
+  // Only meaningful against a Central Library document — narrows generation
+  // to a topic via multi-query vector search instead of the whole document.
+  const [quizTopic, setQuizTopic] = useState("")
+
+  useEffect(() => {
+    const apply = (creds: ReturnType<typeof resolveCredentials>) => {
+      if (creds) setModelConfig(toModelConfig(creds))
+    }
+    apply(resolveCredentials())
+    const token = getToken()
+    if (token) fetchAccountCredentials(token).then(apply).catch(() => {})
+  }, [])
 
   useEffect(() => {
     if (quizConfig.source === "document") {
+      fetch("/api/learning/documents/library")
+        .then((r) => (r.ok ? r.json() : { documents: [] }))
+        .then((data) => setLibraryDocuments(data.documents || []))
+        .catch(() => setLibraryDocuments([]))
+
       setDocumentsLoading(true)
-      const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
+      const token = getToken()
       if (token) {
-        fetch("/api/learning/documents", {
-          headers: { Authorization: `Bearer ${token}` },
-        })
+        apiFetch("/api/learning/documents")
           .then((r) => r.json())
           .then((data) => {
             if (data.success && data.documents) {
@@ -94,13 +140,62 @@ export default function QuizPage() {
       }
     } else {
       setDocuments([])
+      setLibraryDocuments([])
     }
   }, [quizConfig.source])
+
+  // Pick up a quiz generated on the Study page (Generate Quiz button) and land
+  // straight in the quiz-taking view instead of the config form.
+  useEffect(() => {
+    const pending = typeof window !== "undefined" ? sessionStorage.getItem("quiz_pending") : null
+    if (!pending) return
+    sessionStorage.removeItem("quiz_pending")
+    try {
+      const data = JSON.parse(pending)
+      setQuiz(data)
+      setIsSaved(false)
+      setCurrentQuestionIndex(0)
+      setAnswers({})
+      setShowResults(false)
+      setScores({})
+    } catch {
+      // ignore malformed cache entry
+    }
+  }, [])
+
+  // Pick up ?quizId= (e.g. "Take Quiz" from the saved-quizzes list) and load
+  // that specific quiz to retake.
+  useEffect(() => {
+    const quizId = searchParams?.get("quizId")
+    if (!quizId) return
+    apiFetch(`/api/quiz/${quizId}`)
+      .then(async (res) => {
+        if (!res.ok) throw new Error(await readApiError(res))
+        return res.json()
+      })
+      .then((data) => {
+        setQuiz(data)
+        setIsSaved(true) // loaded from the saved-quizzes list, already saved
+        setCurrentQuestionIndex(0)
+        setAnswers({})
+        setShowResults(false)
+        setScores({})
+      })
+      .catch((error) => {
+        toast({
+          title: "Couldn't load quiz",
+          description: error instanceof Error ? error.message : "Failed to load saved quiz",
+          variant: "destructive",
+        })
+      })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams])
 
   useEffect(() => {
     if (quiz && quiz.timeLimit > 0) {
       setTimeRemaining(quiz.timeLimit)
     }
+    if (quiz) quizStartRef.current = Date.now()
   }, [quiz])
 
   useEffect(() => {
@@ -119,26 +214,35 @@ export default function QuizPage() {
   }, [timeRemaining, quiz, showResults])
 
   const handleDocumentUpload = async (file: File) => {
-    const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
-    const userStr = typeof window !== "undefined" ? localStorage.getItem("user") : null
-    const user = userStr ? JSON.parse(userStr) : null
-    const userId = user?.id || "user_123"
+    const token = getToken()
     if (!token) {
       toast({ title: "Login required", description: "Please log in to upload documents", variant: "destructive" })
       return
     }
+    const userId = getUser()?.id
     setUploadingDoc(true)
     try {
       const formData = new FormData()
       formData.append("file", file)
       formData.append("document_id", `doc_${Date.now()}_${Math.random().toString(36).slice(2)}`)
-      formData.append("user_id", userId)
-      const res = await fetch("/api/learning/upload", { method: "POST", body: formData })
+      if (userId) formData.append("user_id", userId)
+      const res = await apiFetch("/api/learning/upload", { method: "POST", body: formData })
       const data = await res.json()
       if (data.document_id) {
-        setDocuments((prev) => [{ id: data.document_id, file_name: file.name, processed: true }, ...prev])
-        setQuizConfig((c) => ({ ...c, document_id: data.document_id }))
-        toast({ title: "Document uploaded", description: `Processed ${data.chunk_count || 0} chunks` })
+        const ready = data.status === "ready"
+        setDocuments((prev) => [
+          { id: data.document_id, file_name: file.name, processed: ready, processing_status: ready ? "completed" : "queued" },
+          ...prev,
+        ])
+        if (ready) {
+          setQuizConfig((c) => ({ ...c, document_id: data.document_id }))
+          toast({ title: "Document ready", description: `Processed ${data.chunk_count || 0} chunks` })
+        } else {
+          toast({
+            title: "Document uploaded",
+            description: "We're processing it in the background — we'll notify you when it's ready to quiz from.",
+          })
+        }
       } else throw new Error(data.message || "Upload failed")
     } catch (e: any) {
       toast({ title: "Upload failed", description: e.message || "Failed to upload", variant: "destructive" })
@@ -147,6 +251,10 @@ export default function QuizPage() {
     }
   }
 
+  const isLibraryDocSelected =
+    quizConfig.source === "document" &&
+    libraryDocuments.some((d) => d.id === quizConfig.document_id)
+
   const handleGenerateQuiz = async () => {
     if (quizConfig.source === "document" && !quizConfig.document_id) {
       toast({ title: "Select a document", description: "Choose a document or upload one first", variant: "destructive" })
@@ -154,10 +262,9 @@ export default function QuizPage() {
     }
     setIsGenerating(true)
     try {
-      const userStr = typeof window !== "undefined" ? localStorage.getItem("user") : null
-      const user = userStr ? JSON.parse(userStr) : null
-      const userId = user?.id || undefined
-      const response = await fetch("/api/quiz/generate", {
+      const userId = getUser()?.id
+      const topic = isLibraryDocSelected ? quizTopic.trim() : ""
+      const response = await apiFetch("/api/quiz/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -168,18 +275,27 @@ export default function QuizPage() {
           num_open_ended: quizConfig.num_open_ended,
           source: quizConfig.source,
           document_id: quizConfig.document_id || undefined,
-          model_name: modelConfig.model_name || undefined,
-          api_key: modelConfig.api_key || undefined,
-          provider: modelConfig.provider,
+          topic: topic || undefined,
+          ...resolveModelFields(modelConfig),
           use_internet: true,
           user_id: userId,
         })
       })
 
-      if (!response.ok) throw new Error("Failed to generate quiz")
+      if (!response.ok) throw new Error(await readApiError(response))
 
       const data = await response.json()
+
+      if (data.status === "queued") {
+        toast({
+          title: "Generating your quiz",
+          description: data.message || "We'll notify you when it's ready.",
+        })
+        return
+      }
+
       setQuiz(data)
+      setIsSaved(false)
       setCurrentQuestionIndex(0)
       setAnswers({})
       setShowResults(false)
@@ -246,16 +362,14 @@ export default function QuizPage() {
         } else {
           // Score open-ended using AI
           try {
-            const scoreResponse = await fetch("/api/quiz/score-open", {
+            const scoreResponse = await apiFetch("/api/quiz/score-open", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
                 question: question.question,
                 correct_answer: question.correct_answer,
                 user_answer: userAnswer,
-                model_name: modelConfig.model_name || undefined,
-                api_key: modelConfig.api_key || undefined,
-                provider: modelConfig.provider
+                ...resolveModelFields(modelConfig),
               })
             })
 
@@ -275,8 +389,11 @@ export default function QuizPage() {
 
       // Submit to backend
       const totalScore = Object.values(newScores).reduce((a, b) => a + b, 0) / quiz.questions.length
+      const timeSpent = quizStartRef.current
+        ? Math.round((Date.now() - quizStartRef.current) / 1000)
+        : quiz.timeLimit - timeRemaining
 
-      await fetch("/api/quiz/submit", {
+      const submitResponse = await apiFetch("/api/quiz/submit", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -284,15 +401,23 @@ export default function QuizPage() {
           answers: scoredAnswers,
           scores: newScores,
           total_score: totalScore,
-          time_spent: quiz.timeLimit - timeRemaining
+          time_spent: timeSpent
         })
       })
 
       setShowResults(true)
-      toast({
-        title: "Quiz Submitted",
-        description: `Your score: ${totalScore.toFixed(1)}/10`
-      })
+      if (submitResponse.ok) {
+        toast({
+          title: "Quiz Submitted",
+          description: `Your score: ${totalScore.toFixed(1)}/10`
+        })
+      } else {
+        toast({
+          title: "Results ready (not saved)",
+          description: `Your score: ${totalScore.toFixed(1)}/10. We couldn't save this to your history — your connection may be unstable.`,
+          variant: "destructive"
+        })
+      }
     } catch (error) {
       toast({
         title: "Error",
@@ -301,6 +426,29 @@ export default function QuizPage() {
       })
     } finally {
       setIsLoading(false)
+    }
+  }
+
+  const handleSaveQuiz = async () => {
+    if (!quiz) return
+    setIsSaving(true)
+    try {
+      const response = await apiFetch("/api/quiz/saved", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ quiz_id: quiz.id }),
+      })
+      if (!response.ok) throw new Error(await readApiError(response))
+      setIsSaved(true)
+      toast({ title: "Quiz saved", description: "Find it later under Saved Quizzes." })
+    } catch (error) {
+      toast({
+        title: "Couldn't save quiz",
+        description: error instanceof Error ? error.message : "Please log in to save quizzes",
+        variant: "destructive",
+      })
+    } finally {
+      setIsSaving(false)
     }
   }
 
@@ -394,6 +542,8 @@ export default function QuizPage() {
               </p>
             </div>
 
+            <FreeModelNotice className="mb-4" />
+
             <Card className="bg-black/60 backdrop-blur-md border-purple-700/40">
               <CardHeader>
                 <CardTitle>Quiz Configuration</CardTitle>
@@ -475,7 +625,32 @@ export default function QuizPage() {
                     <Label>Select Document</Label>
                     <div className="flex gap-2">
                       <div className="flex-1 min-h-0 flex flex-col gap-2">
-                        <div className="border border-purple-700/40 rounded-lg bg-black/50 max-h-32 overflow-y-auto p-2 space-y-1">
+                        <div className="border border-purple-700/40 rounded-lg bg-black/50 max-h-48 overflow-y-auto p-2 space-y-1">
+                          {libraryDocuments.length > 0 && (
+                            <div className="pb-1 mb-1 border-b border-purple-700/30">
+                              <p className="text-[11px] uppercase tracking-wide text-purple-400 px-1 pb-1">
+                                Central Library
+                              </p>
+                              {libraryDocuments.map((doc) => (
+                                <button
+                                  key={doc.id}
+                                  type="button"
+                                  onClick={() => setQuizConfig((c) => ({ ...c, document_id: doc.id }))}
+                                  className={`w-full text-left px-3 py-2 rounded-md text-sm truncate transition-colors ${
+                                    quizConfig.document_id === doc.id
+                                      ? "bg-purple-700/50 border border-purple-500"
+                                      : "hover:bg-purple-900/30 border border-transparent"
+                                  }`}
+                                >
+                                  <FileText className="h-4 w-4 inline mr-2 text-purple-400" />
+                                  {doc.file_name}
+                                </button>
+                              ))}
+                              <p className="text-[11px] uppercase tracking-wide text-purple-400 px-1 pt-2 pb-1">
+                                Your Documents
+                              </p>
+                            </div>
+                          )}
                           {documentsLoading ? (
                             <div className="flex items-center gap-2 text-gray-400 py-2">
                               <Loader2 className="h-4 w-4 animate-spin" />
@@ -484,21 +659,35 @@ export default function QuizPage() {
                           ) : documents.length === 0 ? (
                             <p className="text-sm text-gray-400 py-2">No documents yet. Upload one below.</p>
                           ) : (
-                            documents.map((doc) => (
-                              <button
-                                key={doc.id}
-                                type="button"
-                                onClick={() => setQuizConfig((c) => ({ ...c, document_id: doc.id }))}
-                                className={`w-full text-left px-3 py-2 rounded-md text-sm truncate transition-colors ${
-                                  quizConfig.document_id === doc.id
-                                    ? "bg-purple-700/50 border border-purple-500"
-                                    : "hover:bg-purple-900/30 border border-transparent"
-                                }`}
-                              >
-                                <FileText className="h-4 w-4 inline mr-2 text-purple-400" />
-                                {doc.file_name}
-                              </button>
-                            ))
+                            documents.map((doc) => {
+                              const isReady = doc.processed
+                              return (
+                                <button
+                                  key={doc.id}
+                                  type="button"
+                                  disabled={!isReady}
+                                  onClick={() => isReady && setQuizConfig((c) => ({ ...c, document_id: doc.id }))}
+                                  className={`w-full text-left px-3 py-2 rounded-md text-sm truncate transition-colors flex items-center justify-between gap-2 ${
+                                    !isReady
+                                      ? "opacity-50 cursor-not-allowed border border-transparent"
+                                      : quizConfig.document_id === doc.id
+                                        ? "bg-purple-700/50 border border-purple-500"
+                                        : "hover:bg-purple-900/30 border border-transparent"
+                                  }`}
+                                >
+                                  <span className="truncate">
+                                    <FileText className="h-4 w-4 inline mr-2 text-purple-400" />
+                                    {doc.file_name}
+                                  </span>
+                                  {!isReady && (
+                                    <span className="text-[10px] text-purple-300 shrink-0 flex items-center gap-1">
+                                      <Loader2 className="h-3 w-3 animate-spin" />
+                                      Processing
+                                    </span>
+                                  )}
+                                </button>
+                              )
+                            })
                           )}
                         </div>
                         <label className="flex items-center justify-center gap-2 px-3 py-2 border border-dashed border-purple-700/40 rounded-lg cursor-pointer hover:bg-purple-900/20 transition-colors">
@@ -520,6 +709,22 @@ export default function QuizPage() {
                         </label>
                       </div>
                     </div>
+                    {isLibraryDocSelected && (
+                      <div className="space-y-1 pt-1">
+                        <Label className="text-sm">Topic (optional)</Label>
+                        <Input
+                          value={quizTopic}
+                          onChange={(e) => setQuizTopic(e.target.value)}
+                          placeholder="e.g. Diabetic ketoacidosis management"
+                          className="bg-black/50 border-purple-700/40"
+                        />
+                        <p className="text-xs text-gray-400">
+                          Central library documents can be large — give a topic and we'll search the
+                          document for relevant sections and generate the quiz as a background job,
+                          notifying you when it's ready. Leave blank to quiz the whole document now.
+                        </p>
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -695,6 +900,19 @@ export default function QuizPage() {
                       className="border-purple-700/40"
                     >
                       New Quiz
+                    </Button>
+                    <Button
+                      onClick={handleSaveQuiz}
+                      disabled={isSaving || isSaved}
+                      variant="outline"
+                      className="border-purple-700/40"
+                    >
+                      {isSaving ? (
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                      ) : (
+                        <Bookmark className="h-4 w-4 mr-2" />
+                      )}
+                      {isSaved ? "Saved" : "Save Quiz"}
                     </Button>
                     <motion.div
                       whileHover={{ scale: 1.05 }}

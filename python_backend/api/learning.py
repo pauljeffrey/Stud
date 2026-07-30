@@ -61,33 +61,131 @@ async def list_learning_enrollments(
         raise HTTPException(status_code=500, detail="Failed to list enrollments")
 
 
+def _serialize_document(d: dict) -> dict:
+    return {
+        "id": d["id"],
+        "file_name": d.get("file_name", d.get("name", "Untitled")),
+        "processed": d.get("processed", False),
+        "processing_status": d.get("processing_status", "pending"),
+        "scope": d.get("scope", "private"),
+        "pinecone_index_name": d.get("pinecone_index_name"),
+        "pinecone_index_expires_at": d.get("pinecone_index_expires_at"),
+        "chunk_count": d.get("chunk_count", 0),
+    }
+
+
 @router.get("/learning/documents")
 async def list_documents(user_id: str = Depends(get_current_user_id)):
     """
-    List user's uploaded documents (file_name, id, expiry status).
-    Used by quiz page when source is 'from document'.
+    List the caller's own uploaded documents (file_name, id, expiry/processing
+    status). Used by quiz page when source is 'from document', and by the
+    Study page's own-document list. See /learning/documents/library for the
+    shared central-library documents.
     """
     try:
         docs = await db_service.get_user_documents(user_id, limit=50)
-        return {
-            "success": True,
-            "documents": [
-                {
-                    "id": d["id"],
-                    "file_name": d.get("file_name", d.get("name", "Untitled")),
-                    "processed": d.get("processed", False),
-                    "pinecone_index_name": d.get("pinecone_index_name"),
-                    "pinecone_index_expires_at": d.get("pinecone_index_expires_at"),
-                    "chunk_count": d.get("chunk_count", 0),
-                }
-                for d in docs
-            ],
-        }
+        return {"success": True, "documents": [_serialize_document(d) for d in docs]}
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"List documents error: {e}")
         raise HTTPException(status_code=500, detail="Failed to list documents")
+
+
+@router.get("/learning/documents/library")
+async def list_library_documents():
+    """
+    The shared central library: curated, standard reference documents
+    available to every user (no auth required to browse — matches other
+    public read endpoints). Encourage checking here before uploading a
+    private copy, to avoid duplicate vectorization of the same material.
+    """
+    try:
+        docs = await db_service.list_global_documents()
+        return {"success": True, "documents": [_serialize_document(d) for d in docs]}
+    except Exception as e:
+        logger.error(f"List library documents error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to list central library documents")
+
+
+@router.post("/learning/documents/{document_id}/suggest-global")
+async def suggest_document_for_library(
+    document_id: str,
+    request: Optional[dict] = None,
+    user_id: str = Depends(get_current_user_id),
+):
+    """File a request to promote the caller's own document into the shared
+    central library. Reviewed manually — this only records the suggestion."""
+    try:
+        doc = await db_service.get_document(document_id)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+        if str(doc.get("user_id")) != str(user_id):
+            raise HTTPException(status_code=403, detail="You can only suggest your own documents")
+        note = (request or {}).get("note") if request else None
+        await db_service.create_document_suggestion(document_id=document_id, user_id=user_id, note=note)
+        return {"success": True, "message": "Thanks — we'll review this for the central library."}
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Failed to record document suggestion")
+        raise HTTPException(status_code=500, detail="Failed to submit suggestion")
+
+
+def _count_pages(content: bytes, file_type: str, file_name: str) -> Optional[int]:
+    """Best-effort page count. PDF/PPTX have a real page/slide concept; DOCX and
+    images don't (no rendering engine here), so this returns None for those —
+    only the byte-size cap applies to them."""
+    try:
+        if file_type == "application/pdf" or file_name.lower().endswith(".pdf"):
+            import PyPDF2
+            from io import BytesIO
+            return len(PyPDF2.PdfReader(BytesIO(content)).pages)
+        if (
+            file_type == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            or file_name.lower().endswith(".pptx")
+        ):
+            from pptx import Presentation
+            from io import BytesIO
+            return len(Presentation(BytesIO(content)).slides)
+    except Exception as e:
+        logger.warning(f"Page count check failed for {file_name} (continuing without it): {e}")
+    return None
+
+
+async def _process_upload_and_notify(
+    *, content: bytes, file_name: str, file_type: str, uid: str, document_id: str
+) -> None:
+    """Background job: run the (slow) extract/chunk/embed/Pinecone pipeline,
+    then notify the user of success or failure so they don't have to wait."""
+    try:
+        await doc_processor.process_document(
+            file_content=content,
+            file_name=file_name,
+            file_type=file_type,
+            user_id=uid,
+            document_id=document_id,
+        )
+        await db_service.create_notification(
+            user_id=uid,
+            type="document_ready",
+            title="Document ready",
+            message=f"'{file_name}' has been processed — start studying or generate a quiz from it.",
+            related_id=document_id,
+        )
+    except Exception as e:
+        logger.exception(f"Background document processing failed for {document_id}")
+        try:
+            await db_service.update_document(document_id, {"processing_status": "failed"})
+            await db_service.create_notification(
+                user_id=uid,
+                type="document_failed",
+                title="Document processing failed",
+                message=f"We couldn't process '{file_name}': {str(e)[:200]}. Please try re-uploading.",
+                related_id=document_id,
+            )
+        except Exception:
+            logger.exception(f"Failed to record failure state for document {document_id}")
 
 
 @router.post("/learning/upload")
@@ -99,7 +197,9 @@ async def upload_document(
     authorization: Optional[str] = Header(None),
 ):
     """
-    Upload and process document for learning.
+    Upload a document and process it in the background. Returns immediately
+    with status="queued" — the caller is notified (via /api/notifications)
+    once processing finishes instead of blocking on it.
     If document_id is omitted, a deterministic ID is generated from a
     hash of (user_id + file_name + content), so re-uploading the same
     file is idempotent.
@@ -110,10 +210,22 @@ async def upload_document(
         )
         content = await file.read()
         file_name = file.filename or "untitled"
+        file_type = file.content_type or "application/octet-stream"
         uid = resolve_user_id(
             authorization,
             user_id.strip() if user_id and str(user_id).strip() else None,
         )
+
+        # Fast validation up front so bad uploads fail immediately rather than
+        # via an async notification later.
+        doc_processor.validate_file_size(content, file_type)
+        max_pages = getattr(config, "MAX_DOCUMENT_PAGES", 100)
+        page_count = _count_pages(content, file_type, file_name)
+        if page_count is not None and page_count > max_pages:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Document has {page_count} pages, which exceeds the {max_pages}-page limit.",
+            )
 
         if not document_id:
             content_hash = hashlib.sha256(
@@ -125,28 +237,43 @@ async def upload_document(
         if existing and existing.get("processed"):
             return {
                 "success": True,
+                "status": "ready",
                 "message": "Document already processed",
                 "document_id": existing["id"],
                 "chunk_count": existing.get("chunk_count", 0),
                 "expires_at": existing.get("pinecone_index_expires_at"),
                 "already_exists": True,
             }
+        if existing and existing.get("processing_status") not in ("failed", None):
+            return {
+                "success": True,
+                "status": "queued",
+                "message": "Already processing — we'll notify you when it's ready.",
+                "document_id": existing["id"],
+            }
 
-        result = await doc_processor.process_document(
-            file_content=content,
-            file_name=file_name,
-            file_type=file.content_type or "application/octet-stream",
-            user_id=uid,
-            document_id=document_id
+        if not existing:
+            await db_service.create_document(
+                user_id=uid,
+                name=file_name,
+                file_name=file_name,
+                file_type=file_type,
+                file_size=len(content),
+                document_id=document_id,
+            )
+
+        asyncio.create_task(
+            _process_upload_and_notify(
+                content=content, file_name=file_name, file_type=file_type,
+                uid=uid, document_id=document_id,
+            )
         )
 
         return {
             "success": True,
-            "message": "Document uploaded and processed",
-            "document_id": result["document_id"],
-            "chunk_count": result["chunk_count"],
-            "expires_at": result["expires_at"],
-            "s3_key": result.get("s3_key"),
+            "status": "queued",
+            "message": "Uploading — we'll notify you when it's ready.",
+            "document_id": document_id,
         }
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -154,7 +281,7 @@ async def upload_document(
         raise
     except Exception as e:
         logger.error(f"Document upload error: {e}")
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Upload failed")
 
 
 @router.post("/learning/chat")
@@ -287,7 +414,7 @@ async def delete_document(document_id: str, user_id: Optional[str] = None):
         raise
     except Exception as e:
         logger.error(f"Delete document error: {e}")
-        raise HTTPException(status_code=500, detail=f"Delete failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Delete failed")
 
 
 @router.post("/learning/reingest/{document_id}")
@@ -313,7 +440,7 @@ async def reingest_document(document_id: str, user_id: str):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Re-ingestion error: {e}")
-        raise HTTPException(status_code=500, detail=f"Re-ingestion failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Re-ingestion failed")
 
 
 @router.post("/learning/generate-quiz-from-document")
@@ -325,33 +452,61 @@ async def generate_quiz_from_document(
     num_multiple_choice: Optional[int] = Form(None),
     num_open_ended: Optional[int] = Form(None),
     num_true_false: Optional[int] = Form(None),
-    user_id: Optional[str] = Form(None)
+    user_id: Optional[str] = Form(None),
+    chat_context: Optional[str] = Form(None),
 ):
-    """Generate a quiz based on document content"""
+    """Generate a quiz based on document content, optionally biased toward
+    whatever the learner has been discussing with the tutor (chat_context)."""
     try:
         # Get document
         doc = await db_service.get_document(document_id)
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
-        
+
         document_content = doc.get("content", "")
-        
+
+        quiz_context = document_content
+        if chat_context and chat_context.strip():
+            quiz_context = (
+                "The learner has been actively discussing the following topics/questions "
+                "about this document with a tutor. Prioritize quiz questions that reflect "
+                f"what they were focused on:\n{chat_context.strip()[:4000]}\n\n"
+                f"{document_content}"
+            )
+
         # Use quiz agent to generate quiz
         from agents.quiz_agent import get_quiz_agent
         quiz_agent = get_quiz_agent()
-        
-        quiz = await quiz_agent.generate_quiz(
-            from_document=True,
-            document_id=document_id,
+
+        quiz_kwargs = dict(
             num_questions=num_questions,
             quiz_type=quiz_type,
             time_limit=time_limit,
             num_multiple_choice=num_multiple_choice,
             num_open_ended=num_open_ended,
             num_true_false=num_true_false,
-            context=document_content
+            context=quiz_context,
         )
-        
+        try:
+            quiz = await quiz_agent.generate_quiz(
+                from_document=True,
+                document_id=document_id,
+                **quiz_kwargs,
+            )
+        except Exception as doc_err:
+            # Vector index may have expired - fall back to the raw stored content
+            # (same fallback /quiz/generate already uses)
+            err_msg = str(doc_err).lower()
+            if ("expired" in err_msg or "not found" in err_msg or "no document content" in err_msg) and len(document_content or "") > 200:
+                quiz = await quiz_agent.generate_quiz(
+                    from_document=True,
+                    document_id=None,
+                    text_content=document_content,
+                    **quiz_kwargs,
+                )
+            else:
+                raise
+
         # Save quiz with document reference
         quiz_data = quiz.model_dump(mode="json")
         await db_service.create_quiz(
@@ -370,7 +525,7 @@ async def generate_quiz_from_document(
         raise
     except Exception as e:
         logger.error(f"Quiz generation error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to generate quiz: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to generate quiz")
 
 
 @router.post("/learning/generate-game-from-document")
@@ -380,6 +535,7 @@ async def generate_game_from_document(
     profession: Optional[str] = Form(None),
     era: Optional[str] = Form(None),
     natural_condition: Optional[str] = Form(None),
+    total_cases: Optional[int] = Form(None),
 ):
     """Generate a Mediquest game scenario grounded in the uploaded document."""
     try:
@@ -387,7 +543,9 @@ async def generate_game_from_document(
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
 
-        uid = user_id or doc.get("user_id", "user_123")
+        uid = user_id or doc.get("user_id")
+        if not uid:
+            raise HTTPException(status_code=400, detail="user_id is required to generate a game from this document")
         prof = profession
         if not prof:
             user = await db_service.get_user(uid)
@@ -396,13 +554,16 @@ async def generate_game_from_document(
         from models.states import GameConfig, UserDetails, DifficultyLevel
         from agents.game_master import get_game_master_agent
 
+        max_cases = getattr(config, "DOCUMENT_GAME_MAX_CASES", 20)
+        resolved_total_cases = max(1, min(total_cases or 5, max_cases))
+
         game_config = GameConfig(
             profession=prof,
             era=era,
             natural_conditions=natural_condition,
             from_document=True,
             document_id=document_id,
-            total_cases=5,
+            total_cases=resolved_total_cases,
         )
         user_details = UserDetails(user_id=uid, profession=prof)
         game_master = get_game_master_agent()
@@ -446,7 +607,7 @@ async def generate_game_from_document(
         raise
     except Exception as e:
         logger.error(f"Game generation error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to generate game: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to generate game")
 
 
 @router.post("/learning/mark-task-completed")

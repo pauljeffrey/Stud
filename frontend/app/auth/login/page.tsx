@@ -57,9 +57,6 @@ function LoginPageContent() {
       if (result.token && result.user) {
         saveAuth(result.token, result.user)
       }
-      if (result.session_token) {
-        localStorage.setItem("session_token", result.session_token)
-      }
 
       toast({
         title: "Login successful",

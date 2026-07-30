@@ -3,6 +3,7 @@ Refactored Game Master Agent for ClinicaQuest
 Responsible for generating clinical cases, managing achievements, and orchestrating game flow
 Handles 20-50 unique clinical cases per adventure
 """
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any
@@ -19,13 +20,14 @@ try:
 except ImportError:
     class Config:
         GAME_MASTER_NAME = "Game Master"
-from agents.agents import get_game_master_model
+from agents.agents import get_game_master_model, get_state_controller_model
 from models.states import (
     GameState, GameWorldModel, CaseState, NPCState,
     Achievement, AchievementType, PerformanceAnalysis, GameConfig,
     ClinicalCaseMetadata, PreviousCases, DifficultyLevel,
     UserDetails, GameStateUpdateOutput, WorldGameInitOutput, CaseAndNpcsInitOutput,
 )
+from agents._shared import merge_credentials
 from agents.achievement_subagent import generate_achievements as generate_achievements_agent
 from agents.game_world_agent import get_game_world_agent
 from agents.state_controller_agent import get_state_controller_agent
@@ -41,10 +43,15 @@ from configs.config import config
 from utils import search_internet
 
 
-def _init_agent_options() -> dict:
+def _case_npcs_init_model(api_key: Optional[str] = None):
+    """Call 2 uses STATE_CONTROLLER_MODEL_NAME — lighter than the game-master model."""
+    return get_state_controller_model(None, api_key)
+
+
+def _init_agent_options(*, fast_fail: bool = False) -> dict:
     from pydantic_ai.settings import ModelSettings
     return {
-        "output_retries": config.INIT_OUTPUT_RETRIES,
+        "retries": 0 if fast_fail else config.INIT_OUTPUT_RETRIES,
         "model_settings": ModelSettings(timeout=config.MODEL_TIMEOUT),
     }
 
@@ -183,19 +190,18 @@ class GameMasterAgent:
             - Characters must fit the case and game world
             """
 
-        init_opts = _init_agent_options()
         self.world_game_init_agent = Agent(
             model,
             system_prompt=self.world_game_init_system_prompt,
             output_type=WorldGameInitOutput,
-            **init_opts,
+            **_init_agent_options(fast_fail=False),
         )
 
         self.case_npcs_init_agent = Agent(
-            model,
+            _case_npcs_init_model(api_key),
             system_prompt=self.case_npcs_init_system_prompt,
             output_type=CaseAndNpcsInitOutput,
-            **init_opts,
+            **_init_agent_options(fast_fail=True),
         )
         
         # Chat agent will be initialized dynamically with game state context
@@ -341,10 +347,9 @@ class GameMasterAgent:
     
     def _reinitialize_model(self, model_name: Optional[str] = None, api_key: Optional[str] = None):
         """Reinitialize with new user-provided credentials."""
-        if model_name is not None:
-            self.model_name = model_name
-        if api_key is not None:
-            self.api_key = api_key
+        self.model_name, self.api_key = merge_credentials(
+            self.model_name, self.api_key, model_name, api_key
+        )
         model = get_game_master_model(self.model_name, self.api_key)
         self.agent = Agent(
             model,
@@ -358,18 +363,17 @@ class GameMasterAgent:
             output_type=GameState,
             tools=[fetch_previous_cases]
         )
-        init_opts = _init_agent_options()
         self.world_game_init_agent = Agent(
             model,
             system_prompt=self.world_game_init_system_prompt,
             output_type=WorldGameInitOutput,
-            **init_opts,
+            **_init_agent_options(fast_fail=False),
         )
         self.case_npcs_init_agent = Agent(
-            model,
+            _case_npcs_init_model(self.api_key),
             system_prompt=self.case_npcs_init_system_prompt,
             output_type=CaseAndNpcsInitOutput,
-            **init_opts,
+            **_init_agent_options(fast_fail=True),
         )
         self.chat_agent = None
         self.setup_tools()
@@ -411,6 +415,34 @@ class GameMasterAgent:
         
         # Default to Medium
         return DifficultyLevel.Easy
+
+    @staticmethod
+    def _apply_case_identity(
+        case_state: CaseState,
+        user_id: str,
+        game_state: GameState,
+        game_config: GameConfig,
+    ) -> None:
+        """Ensure case_state has ids and CommonFields before NPC generation."""
+        if not getattr(case_state, "case_state_id", None):
+            case_state.case_state_id = str(uuid.uuid4())
+        if not getattr(case_state, "case_id", None):
+            case_state.case_id = game_state.case_id
+        case_state.user_id = user_id
+        if not getattr(case_state, "profession", None):
+            case_state.profession = game_config.profession
+        if not getattr(case_state, "clinical_setting", None):
+            case_state.clinical_setting = game_config.clinical_setting
+        if not getattr(case_state, "subject", None):
+            case_state.subject = getattr(game_config, "subject", None)
+        if not getattr(case_state, "era", None):
+            case_state.era = game_config.era
+        if not getattr(case_state, "natural_conditions", None):
+            case_state.natural_conditions = game_config.natural_conditions
+        if not getattr(case_state, "nation_type", None):
+            case_state.nation_type = game_config.nation_type
+        if not getattr(case_state, "economic_advantage", None):
+            case_state.economic_advantage = game_config.economic_advantage
     
     
     async def initialize_game(
@@ -444,6 +476,7 @@ class GameMasterAgent:
             user_details_dict["user id"] = user_id
 
         # Call 1: world + game state
+        logger.info("Init call 1/2: world + game state")
         try:
             world_game_result = await self.world_game_init_agent.run(f"""
                 Create game_world and game_state for a new medical education adventure.
@@ -460,6 +493,7 @@ class GameMasterAgent:
                 """)
         except Exception as e:
             raise Exception(f"Failed to generate world and game state: {str(e)}")
+        logger.info("Init call 1/2 complete")
 
         init_output = world_game_result.output
         game_world = init_output.game_world
@@ -518,14 +552,17 @@ class GameMasterAgent:
                 - Medically accurate and educational
                 - NPCs must match case_state.npc_roles and fit the world setting
                 """
+        logger.info("Init call 2/2: case + NPCs via STATE_CONTROLLER model (single attempt, then split fallback)")
         try:
             case_npcs_result = await self.case_npcs_init_agent.run(case_prompt)
             case_npcs_output = case_npcs_result.output
             case_state = case_npcs_output.case_state
+            self._apply_case_identity(case_state, user_id, game_state, game_config)
             npc_states = finalize_npc_states(case_npcs_output.npc_states, case_state)
+            logger.info("Init call 2/2 complete (combined)")
         except Exception as combined_err:
             logger.warning(
-                "Combined case+NPC init failed (%s); falling back to split generation",
+                "Combined case+NPC init failed (%s); falling back to split generation (calls 3-4)",
                 combined_err,
             )
             case_state, previous_cases = await self._generate_clinical_case(
@@ -536,19 +573,17 @@ class GameMasterAgent:
                 case_metadata=case_metadata,
                 previous_cases=previous_cases,
             )
+            self._apply_case_identity(case_state, user_id, game_state, game_config)
             npc_states = await self.npc_agent.generate_all_npcs_for_case(
                 case_state=case_state,
                 game_world=game_world,
             )
+            logger.info("Init fallback complete (split case + NPCs)")
 
         if case_state is None:
             raise Exception("Clinical case generation returned None")
 
-        if not getattr(case_state, "case_state_id", None):
-            case_state.case_state_id = str(uuid.uuid4())
-        if not getattr(case_state, "case_id", None):
-            case_state.case_id = game_state.case_id
-        case_state.user_id = user_id
+        self._apply_case_identity(case_state, user_id, game_state, game_config)
 
         if case_state.case_metadata is None:
             case_state.case_metadata = ClinicalCaseMetadata(
@@ -782,18 +817,23 @@ class GameMasterAgent:
             if game_state.user_performance else 5.0
         )
 
-        achievements_out = await generate_achievements_agent(
-            avg_score=avg_score,
-            user_performance_scores=[p.score for p in game_state.user_performance],
-            previous_achievements=game_state.achievements,
-            current_case_number=game_state.current_case_number,
-            total_cases=game_state.total_cases,
-            difficulty_level=game_state.difficulty_level,
-            profession=getattr(game_state.game_config, "profession", None),
+        # Achievements and world-update are independent of each other's output —
+        # run them concurrently instead of sequentially (only update_game below
+        # needs both results).
+        achievements_out, updated_world = await asyncio.gather(
+            generate_achievements_agent(
+                avg_score=avg_score,
+                user_performance_scores=[p.score for p in game_state.user_performance],
+                previous_achievements=game_state.achievements,
+                current_case_number=game_state.current_case_number,
+                total_cases=game_state.total_cases,
+                difficulty_level=game_state.difficulty_level,
+                profession=getattr(game_state.game_config, "profession", None),
+            ),
+            self._update_game_world(game_state, avg_score),
         )
         game_state.achievements.extend(achievements_out.achievements)
 
-        updated_world = await self._update_game_world(game_state, avg_score)
         previous_cases = game_state.previous_cases or PreviousCases(
             cases=[],
             n_cases_generated=0,

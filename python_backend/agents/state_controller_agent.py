@@ -13,6 +13,7 @@ import json
 import random
 
 from agents.agents import get_state_controller_model
+from agents._shared import merge_credentials
 from models.states import CaseState, PerformanceAnalysis, StateChangeResponse, ClinicalCaseMetadata
 
 logger = logging.getLogger(__name__)
@@ -100,10 +101,9 @@ class StateControllerAgent:
         )
 
     def _reinitialize_model(self, model_name: Optional[str] = None, api_key: Optional[str] = None):
-        if model_name is not None:
-            self._model_name = model_name
-        if api_key is not None:
-            self._api_key = api_key
+        self._model_name, self._api_key = merge_credentials(
+            self._model_name, self._api_key, model_name, api_key
+        )
         model = get_state_controller_model(self._model_name, self._api_key)
         self.agent = Agent(
             model,
@@ -173,6 +173,7 @@ class StateControllerAgent:
         - Time Elapsed: {time_elapsed} seconds
         - Time Remaining: {current_case_state.time_remaining_seconds} seconds
         - Clue Used: {clue_used}
+        - Current Clue: {current_case_state.clue or 'None yet'}
         - Model Answer (correct): {model_answer or getattr(current_case_state, 'answer', None) or 'Not yet revealed'}
         - User's Answer: {user_answer or 'Not yet provided'}
         - maximum number of changes you can make: {current_case_state.max_clinical_changes}
@@ -208,6 +209,8 @@ class StateControllerAgent:
         - Updated diagnosis (if diagnosis becomes clearer)
         - Incremented n_changes
         - Updated time_remaining_seconds (reduce if penalty applied)
+        - Updated clue: a fresh, subtle hint consistent with the new clinical state (1-2 sentences).
+          Do not reveal the diagnosis outright.
 
         Also provide:
         - escalation_level: float between 0.0 (stable) and 1.0 (critical)
